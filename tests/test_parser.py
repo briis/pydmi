@@ -98,3 +98,31 @@ def test_radiation_is_instant_flux(coverage):
     hours = parse_coverage(coverage).all_hours
     assert hours[0].global_radiation_wm2 == 0  # 1e-15 rounds to 0
     assert hours[5].global_radiation_wm2 == 54
+
+
+def test_current_is_interpolated(coverage):
+    fc = parse_coverage(coverage)
+    h0, h1 = fc.all_hours[7], fc.all_hours[8]  # 10:00 and 11:00 UTC
+    now = h0.datetime.replace(minute=45)
+    cur = fc.current(now)
+    assert cur.datetime == now
+    expected = round(h0.temperature_c + (h1.temperature_c - h0.temperature_c) * 0.75, 1)
+    assert cur.temperature_c == expected
+    assert cur.precipitation_mm == h0.precipitation_mm
+    # opt-out returns the start-of-hour step unchanged
+    assert fc.current(now, interpolate=False) is h0
+
+
+def test_bearing_interpolates_across_north():
+    from pydmi.parser import _lerp_bearing
+
+    assert _lerp_bearing(350, 10, 0.5) == 0
+    assert _lerp_bearing(10, 350, 0.25) == 5
+    assert _lerp_bearing(90, 270, 0.5) in (0, 180)
+
+
+def test_current_at_exact_hour(coverage):
+    fc = parse_coverage(coverage)
+    h0 = fc.all_hours[7]
+    cur = fc.current(h0.datetime)
+    assert cur.temperature_c == h0.temperature_c

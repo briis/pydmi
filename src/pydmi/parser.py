@@ -184,6 +184,66 @@ def parse_coverage(
     )
 
 
+# --- interpolation ---------------------------------------------------------
+
+
+def _lerp(a: float | None, b: float | None, f: float, digits: int = 1) -> float | None:
+    if a is None or b is None:
+        return a if f < 0.5 else b
+    return round(a + (b - a) * f, digits)
+
+
+def _lerp_bearing(
+    a: float | None, b: float | None, f: float
+) -> float | None:
+    """Interpolate directions along the shortest arc (350 -> 10 passes 0)."""
+    if a is None or b is None:
+        return a if f < 0.5 else b
+    diff = (b - a + 180) % 360 - 180
+    return round((a + diff * f) % 360)
+
+
+def interpolate_hour(
+    h0: ForecastHour, h1: ForecastHour, when: datetime, latitude: float, longitude: float
+) -> ForecastHour:
+    """Conditions at `when`, between hourly steps h0 and h1."""
+    span = (h1.datetime - h0.datetime).total_seconds()
+    f = 0.0 if span <= 0 else min(1.0, max(0.0, (when - h0.datetime).total_seconds() / span))
+
+    cloud = _lerp(h0.cloud_cover_pct, h1.cloud_cover_pct, f, 0)
+    vis = _lerp(h0.visibility_m, h1.visibility_m, f, 0)
+    wind = _lerp(h0.wind_speed_ms, h1.wind_speed_ms, f)
+    lightning = _lerp(h0.lightning_probability_pct, h1.lightning_probability_pct, f)
+    daylight = is_daylight(when, latitude, longitude)
+
+    return ForecastHour(
+        datetime=when,
+        condition=derive_condition(
+            precipitation_mm=h0.precipitation_mm,  # amount for the current hour
+            precipitation_type=h0.precipitation_type,
+            cloud_cover_pct=cloud,
+            visibility_m=vis,
+            lightning_probability_pct=lightning,
+            wind_speed_ms=wind,
+            daylight=daylight,
+        ),
+        temperature_c=_lerp(h0.temperature_c, h1.temperature_c, f),
+        dew_point_c=_lerp(h0.dew_point_c, h1.dew_point_c, f),
+        humidity_pct=_lerp(h0.humidity_pct, h1.humidity_pct, f, 0),
+        pressure_hpa=_lerp(h0.pressure_hpa, h1.pressure_hpa, f),
+        wind_speed_ms=wind,
+        wind_bearing_deg=_lerp_bearing(h0.wind_bearing_deg, h1.wind_bearing_deg, f),
+        wind_gust_ms=_lerp(h0.wind_gust_ms, h1.wind_gust_ms, f),
+        precipitation_mm=h0.precipitation_mm,
+        precipitation_type=h0.precipitation_type,
+        cloud_cover_pct=cloud,
+        visibility_m=vis,
+        lightning_probability_pct=lightning,
+        global_radiation_wm2=_lerp(h0.global_radiation_wm2, h1.global_radiation_wm2, f, 0),
+        is_daylight=daylight,
+    )
+
+
 # --- daily aggregation ----------------------------------------------------
 
 # Higher number wins when picking the condition for a day.

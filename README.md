@@ -90,6 +90,11 @@ Wherever the data is shown, you must credit DMI. Use `pydmi.ATTRIBUTION`
 - **Daily**: grouped by local date. Today covers the rest of the day. Later days with
   fewer than 12 hours (the end of the run) are dropped.
 - **Model run**: `fc.model_run` is the first time step of the run (UTC).
+- **Current conditions**: `fc.current()` interpolates instantaneous values (temperature,
+  pressure, humidity, wind, cloud cover, radiation) linearly between the two hourly steps
+  around now, so values change smoothly through the hour. Wind direction takes the shortest
+  way around the compass. Precipitation is the amount for the current hour. Use
+  `fc.current(interpolate=False)` to get the start-of-hour step unchanged.
 
 ## Development
 

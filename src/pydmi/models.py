@@ -86,10 +86,26 @@ class Forecast:
         start = now.replace(minute=0, second=0, microsecond=0)
         return [h for h in self.all_hours if h.datetime >= start]
 
-    def current(self, now: datetime | None = None) -> ForecastHour | None:
-        """The forecast step for the current hour, if available."""
+    def current(
+        self, now: datetime | None = None, *, interpolate: bool = True
+    ) -> ForecastHour | None:
+        """Conditions right now.
+
+        With `interpolate=True` (default) instantaneous values (temperature,
+        pressure, wind, ...) are interpolated linearly between the two hourly
+        steps around `now`, and `datetime` is `now`. Precipitation is the amount
+        for the current hour. With `interpolate=False` the step for the start of
+        the current hour is returned unchanged.
+        """
+        now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         hours = self.hourly(now)
-        return hours[0] if hours else None
+        if not hours:
+            return None
+        if not interpolate or len(hours) < 2 or hours[0].datetime > now:
+            return hours[0]
+        from .parser import interpolate_hour  # local import avoids a cycle
+
+        return interpolate_hour(hours[0], hours[1], now, self.latitude, self.longitude)
 
     def daily(
         self,
