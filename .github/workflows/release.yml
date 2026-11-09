@@ -61,3 +61,7 @@ jobs:
 
       - name: "Publish to PyPI"
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # A duplicate run (e.g. a late release event) then succeeds instead of
+          # failing on "File already exists". PyPI never overwrites a version anyway.
+          skip-existing: true
