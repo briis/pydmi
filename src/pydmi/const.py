@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Final
 
-__version__: Final = "0.2.1"
+__version__: Final = "0.3.0"
 
 # DMI moved the open data APIs to opendataapi.dmi.dk and dropped API keys.
 # The old host (dmigw.govcloud.dk) still requires a key - do not use it.
@@ -54,6 +54,18 @@ DEFAULT_PARAMETERS: Final = (
     P_LIGHTNING,
     P_GLOBAL_RADIATION,
 )
+
+# --- Ensemble (chance of precipitation) ----------------------------------
+# DMI's ensemble percentiles give, per hour, the spread of precipitation over
+# the ensemble members. The chance of >= POP_THRESHOLD_MM is read off them.
+EPS_PERCENTILE_COLLECTION: Final = "harmonie_dini_eps_percentiles"
+EPS_PERCENTILES: Final = (0, 10, 25, 50, 75, 90, 100)
+# Value at time t = precipitation during the hour ENDING at t (first step is null).
+P_EPS_PRECIP_1H: Final = "total-precipitation-1h-{p}percentile"
+# "Measurable precipitation" - deliberately lower than PRECIP_THRESHOLD_MM used
+# for the weather icon: a 30 % chance of rain with a cloud icon is normal.
+POP_THRESHOLD_MM: Final = 0.1
+POP_ROUND_TO: Final = 10  # percentiles only give coarse resolution
 
 # DMI precipitation-type index -> name
 PRECIPITATION_TYPES: Final = {

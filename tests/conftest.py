@@ -64,12 +64,45 @@ def coverage() -> dict:
     return make_coverage()
 
 
+def make_eps(run: datetime = RUN, steps: int = 55) -> dict:
+    """Ensemble percentiles of 1 h precipitation, shaped like DMI's response.
+
+    Value at step i covers the hour ending at run + i h; step 0 is null.
+    From step 10 on: p50 = 0.05, p75 = 0.15 -> chance of >= 0.1 mm = 40 %.
+    """
+    times = [(run + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%S.000Z") for i in range(steps)]
+    def pct(p):
+        dry = {0: 0, 10: 0, 25: 0, 50: 0, 75: 0, 90: 0.02, 100: 0.05}[p]
+        wet = {0: 0, 10: 0, 25: 0.01, 50: 0.05, 75: 0.15, 90: 0.4, 100: 1.2}[p]
+        return [None] + [wet if i >= 10 else dry for i in range(1, steps)]
+    return {
+        "type": "Coverage",
+        "domain": {"axes": {"t": {"values": times}, "x": {"values": [12.08]}, "y": {"values": [55.65]}}},
+        "ranges": {
+            f"total-precipitation-1h-{p}percentile": {"values": pct(p), "shape": [steps, 1, 1]}
+            for p in (0, 10, 25, 50, 75, 90, 100)
+        },
+    }
+
+
+@pytest.fixture
+def eps() -> dict:
+    return make_eps()
+
+
 class FakeDMI:
     def __init__(self) -> None:
         self.status = 200
         self.retry_after: str | None = None
         self.body = json.dumps(make_coverage()).encode()
+        self.eps_status = 200
+        self.eps_body = json.dumps(make_eps()).encode()
         self.requests: list[tuple[str, dict]] = []
+
+    @property
+    def main_requests(self) -> list[tuple[str, dict]]:
+        """Requests to the main forecast (excluding the ensemble request)."""
+        return [r for r in self.requests if "harmonie_dini_eps" not in r[0]]
 
 
 @pytest.fixture
@@ -79,14 +112,16 @@ def fake_dmi():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
             state.requests.append((self.path, dict(self.headers)))
-            if state.status != 200:
-                self.send_response(state.status)
+            is_eps = "harmonie_dini_eps_percentiles" in self.path
+            status = state.eps_status if is_eps else state.status
+            if status != 200:
+                self.send_response(status)
                 if state.retry_after:
                     self.send_header("Retry-After", state.retry_after)
                 self.end_headers()
                 self.wfile.write(b"nope")
                 return
-            body = gzip.compress(state.body)
+            body = gzip.compress(state.eps_body if is_eps else state.body)
             self.send_response(200)
             self.send_header("Content-Type", "application/prs.coverage+json")
             self.send_header("Content-Encoding", "gzip")

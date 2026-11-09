@@ -37,6 +37,9 @@ class ForecastHour:
     lightning_probability_pct: float | None
     global_radiation_wm2: float | None
     is_daylight: bool
+    # Chance (0-100) of >= 0.1 mm during this hour, from DMI's ensemble.
+    # None when the ensemble data is unavailable.
+    precipitation_probability_pct: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-friendly dict (datetime as ISO 8601)."""
@@ -60,6 +63,8 @@ class ForecastDay:
     humidity_avg_pct: float | None
     cloud_cover_avg_pct: float | None
     hours_count: int
+    # Highest hourly chance of precipitation in the day (an approximation).
+    precipitation_probability_pct: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

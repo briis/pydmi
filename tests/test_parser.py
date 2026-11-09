@@ -151,3 +151,41 @@ def test_trace_precipitation_is_not_rain():
     assert h.precipitation_mm == 0.1
     assert h.condition == "clear-night"  # fixture: 10 % cloud at night - not "rainy"
     assert h.precipitation_type is None
+
+
+# --- chance of precipitation ---------------------------------------------
+
+
+def test_probability_above_interpolates():
+    from pydmi.parser import probability_above
+
+    pts = {0: 0, 10: 0, 25: 0.01, 50: 0.05, 75: 0.15, 90: 0.4, 100: 1.2}
+    assert probability_above(pts, 0.1) == 37.5  # between p50 (0.05) and p75 (0.15)
+    assert probability_above(pts, 0.0) == 100.0
+    assert probability_above(pts, 5.0) == 0.0  # above p100
+    assert probability_above({0: 0, 50: 0, 100: 0}, 0.1) == 0.0  # all dry
+    assert probability_above({}, 0.1) is None
+    # only p10..p90 returned: above p90 -> "< 10 %" reported as 5
+    assert probability_above({10: 0, 50: 0, 90: 0.05}, 0.1) == 5.0
+
+
+def test_probability_aligned_to_hour_start(coverage, eps):
+    from pydmi.parser import apply_precipitation_probability, parse_precipitation_probability
+
+    probs = parse_precipitation_probability(eps)
+    first = min(probs)
+    assert first == RUN  # value at RUN+1h covers RUN..RUN+1h
+    fc = apply_precipitation_probability(parse_coverage(coverage), probs)
+    assert fc.all_hours[0].precipitation_probability_pct == 0  # dry hour
+    assert fc.all_hours[9].precipitation_probability_pct == 40  # 37.5 rounded to 10
+    assert fc.all_hours[-1].precipitation_probability_pct is None  # beyond ensemble
+
+
+def test_probability_in_current_and_daily(coverage, eps):
+    from pydmi.parser import apply_precipitation_probability, parse_precipitation_probability
+
+    fc = apply_precipitation_probability(parse_coverage(coverage), parse_precipitation_probability(eps))
+    now = fc.all_hours[9].datetime.replace(minute=30)
+    assert fc.current(now).precipitation_probability_pct == 40
+    days = fc.daily(ZoneInfo("Europe/Copenhagen"), fc.all_hours[0].datetime)
+    assert days[0].precipitation_probability_pct == 40

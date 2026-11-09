@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import socket
 import threading
 import urllib.error
@@ -13,9 +14,15 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ._base import _ForecastClientBase
-from .exceptions import DMIConnectionError, DMIParseError
+from .exceptions import DMIConnectionError, DMIError, DMIParseError
 from .models import Forecast
-from .parser import parse_coverage
+from .parser import (
+    apply_precipitation_probability,
+    parse_coverage,
+    parse_precipitation_probability,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class DMIForecast(_ForecastClientBase):
@@ -34,11 +41,18 @@ class DMIForecast(_ForecastClientBase):
             if not force and self._cache_valid(now):
                 assert self._cache is not None
                 return self._cache
-            data = self._request()
-            return self._store(parse_coverage(data, collection=self.collection))
+            forecast = self._store(parse_coverage(self._request(self.url), collection=self.collection))
+            if self.include_precipitation_probability:
+                # Optional extra: a failure here never costs the main forecast.
+                try:
+                    probs = parse_precipitation_probability(self._request(self.probability_url))
+                    apply_precipitation_probability(forecast, probs)
+                except DMIError as err:
+                    _LOGGER.warning("DMI chance of precipitation unavailable: %s", err)
+            return forecast
 
-    def _request(self) -> dict[str, Any]:
-        req = urllib.request.Request(self.url, headers=self.headers)
+    def _request(self, url: str) -> dict[str, Any]:
+        req = urllib.request.Request(url, headers=self.headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read()

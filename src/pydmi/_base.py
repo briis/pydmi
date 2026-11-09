@@ -36,6 +36,7 @@ class _ForecastClientBase:
         timeout: float = c.DEFAULT_TIMEOUT,
         base_url: str = c.FORECAST_BASE_URL,
         user_agent: str | None = None,
+        include_precipitation_probability: bool = True,
     ) -> None:
         lon_min, lat_min, lon_max, lat_max = c.DINI_BBOX
         if collection.startswith("harmonie_dini") and not (
@@ -53,19 +54,33 @@ class _ForecastClientBase:
         self.timeout = timeout
         self.base_url = base_url.rstrip("/")
         self.user_agent = user_agent or c.USER_AGENT
+        # One extra request per update to DMI's ensemble for the chance of rain.
+        self.include_precipitation_probability = include_precipitation_probability
 
         self._cache: Forecast | None = None
         self._blocked_until: datetime | None = None
 
     # -- request ---------------------------------------------------------
-    @property
-    def url(self) -> str:
+    def _position_url(self, collection: str, parameters: Iterable[str]) -> str:
         """Fully encoded /position URL (space in POINT() must be %20, not +)."""
         coords = quote(f"POINT({self.longitude} {self.latitude})", safe="()")
-        params = quote(",".join(self.parameters), safe=",-")
+        params = quote(",".join(parameters), safe=",-")
         return (
-            f"{self.base_url}/collections/{quote(self.collection)}/position"
+            f"{self.base_url}/collections/{quote(collection)}/position"
             f"?coords={coords}&crs=crs84&parameter-name={params}"
+        )
+
+    @property
+    def url(self) -> str:
+        """URL of the main forecast request."""
+        return self._position_url(self.collection, self.parameters)
+
+    @property
+    def probability_url(self) -> str:
+        """URL of the ensemble (chance of precipitation) request."""
+        return self._position_url(
+            c.EPS_PERCENTILE_COLLECTION,
+            (c.P_EPS_PRECIP_1H.format(p=p) for p in c.EPS_PERCENTILES),
         )
 
     @property

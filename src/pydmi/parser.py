@@ -5,7 +5,8 @@ from __future__ import annotations
 import math
 from collections import Counter, defaultdict
 from collections.abc import Sequence
-from datetime import date, datetime, timezone, tzinfo
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any
 
 from . import const as c
@@ -243,7 +244,74 @@ def interpolate_hour(
         lightning_probability_pct=lightning,
         global_radiation_wm2=_lerp(h0.global_radiation_wm2, h1.global_radiation_wm2, f, 0),
         is_daylight=daylight,
+        precipitation_probability_pct=h0.precipitation_probability_pct,
     )
+
+
+# --- chance of precipitation (ensemble percentiles) -----------------------
+
+
+def probability_above(percentiles: dict[int, float], threshold: float) -> float | None:
+    """Chance (0-100) that the value is >= threshold, from ensemble percentiles.
+
+    The percentiles form an empirical CDF; we interpolate linearly between the
+    two percentile points around the threshold. Example: p50 = 0.05 mm and
+    p75 = 0.16 mm -> F(0.1) ~ 61 % -> chance of >= 0.1 mm ~ 39 %.
+    """
+    points = sorted((p, v) for p, v in percentiles.items() if v is not None)
+    if not points:
+        return None
+    lo_p, lo_v = points[0]
+    if threshold <= lo_v:
+        return 100.0 - lo_p  # all members at or above the lowest point
+    hi_p, hi_v = points[-1]
+    if threshold > hi_v:
+        # Above the highest known point; with p100 that is 0 %, with p90 "< 10 %".
+        return (100.0 - hi_p) / 2
+    for (p_a, v_a), (p_b, v_b) in zip(points, points[1:], strict=False):
+        if v_a < threshold <= v_b:
+            frac = 1.0 if v_b == v_a else (threshold - v_a) / (v_b - v_a)
+            return 100.0 - (p_a + (p_b - p_a) * frac)
+    return None  # pragma: no cover
+
+
+def parse_precipitation_probability(
+    data: dict[str, Any], threshold: float = c.POP_THRESHOLD_MM
+) -> dict[datetime, float]:
+    """Ensemble percentile CoverageJSON -> {start of hour: chance in %}.
+
+    DMI's value at time t covers the hour ending at t; we key it by the start
+    of that hour (t - 1 h) to match ForecastHour.datetime.
+    """
+    try:
+        times = [_parse_time(t) for t in data["domain"]["axes"]["t"]["values"]]
+        ranges = data["ranges"]
+    except (KeyError, TypeError, ValueError) as err:
+        raise DMIParseError(f"Unexpected ensemble CoverageJSON: {err}") from err
+    n = len(times)
+    series = {}
+    for pct in c.EPS_PERCENTILES:
+        name = c.P_EPS_PRECIP_1H.format(p=pct)
+        if name in ranges:
+            series[pct] = _series(ranges, name, n)
+    result: dict[datetime, float] = {}
+    for i, t in enumerate(times):
+        point = {pct: vals[i] for pct, vals in series.items() if vals[i] is not None}
+        prob = probability_above(point, threshold)
+        if prob is None:
+            continue
+        rounded = round(prob / c.POP_ROUND_TO) * c.POP_ROUND_TO
+        result[t - timedelta(hours=1)] = float(min(100, max(0, rounded)))
+    return result
+
+
+def apply_precipitation_probability(forecast: Forecast, probabilities: dict[datetime, float]) -> Forecast:
+    """Attach hourly chances of precipitation to a forecast (in place)."""
+    forecast.all_hours = [
+        replace(h, precipitation_probability_pct=probabilities.get(h.datetime))
+        for h in forecast.all_hours
+    ]
+    return forecast
 
 
 # --- daily aggregation ----------------------------------------------------
@@ -318,6 +386,7 @@ def aggregate_daily(
             if h.wind_bearing_deg is not None and h.wind_speed_ms is not None
         ]
         precip_total = round(sum(precs), 1) if precs else None
+        pops = [h.precipitation_probability_pct for h in hs if h.precipitation_probability_pct is not None]
         days.append(
             ForecastDay(
                 date=day,
@@ -331,6 +400,7 @@ def aggregate_daily(
                 humidity_avg_pct=_avg([h.humidity_pct for h in hs]),
                 cloud_cover_avg_pct=_avg([h.cloud_cover_pct for h in hs]),
                 hours_count=len(hs),
+                precipitation_probability_pct=max(pops) if pops else None,
             )
         )
     return days

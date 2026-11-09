@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from types import TracebackType
 from typing import Any
@@ -16,9 +17,15 @@ except ImportError as err:  # pragma: no cover
     ) from err
 
 from ._base import _ForecastClientBase
-from .exceptions import DMIConnectionError, DMIParseError
+from .exceptions import DMIConnectionError, DMIError, DMIParseError
 from .models import Forecast
-from .parser import parse_coverage
+from .parser import (
+    apply_precipitation_probability,
+    parse_coverage,
+    parse_precipitation_probability,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class DMIForecastAsync(_ForecastClientBase):
@@ -53,15 +60,25 @@ class DMIForecastAsync(_ForecastClientBase):
             if not force and self._cache_valid(now):
                 assert self._cache is not None
                 return self._cache
-            data = await self._request()
-            return self._store(parse_coverage(data, collection=self.collection))
+            data = await self._request(self.url)
+            forecast = self._store(parse_coverage(data, collection=self.collection))
+            if self.include_precipitation_probability:
+                # Optional extra: a failure here never costs the main forecast.
+                try:
+                    probs = parse_precipitation_probability(
+                        await self._request(self.probability_url)
+                    )
+                    apply_precipitation_probability(forecast, probs)
+                except DMIError as err:
+                    _LOGGER.warning("DMI chance of precipitation unavailable: %s", err)
+            return forecast
 
-    async def _request(self) -> dict[str, Any]:
+    async def _request(self, url: str) -> dict[str, Any]:
         if self._session is None:
             self._session = aiohttp.ClientSession()
         try:
             async with self._session.get(
-                URL(self.url, encoded=True),
+                URL(url, encoded=True),
                 headers=self.headers,
                 timeout=aiohttp.ClientTimeout(total=self.timeout),
             ) as resp:

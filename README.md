@@ -90,6 +90,12 @@ Wherever the data is shown, you must credit DMI. Use `pydmi.ATTRIBUTION`
 - **Daily**: grouped by local date. Today covers the rest of the day. Later days with
   fewer than 12 hours (the end of the run) are dropped.
 - **Model run**: `fc.model_run` is the first time step of the run (UTC).
+- **Chance of precipitation**: `precipitation_probability_pct` (0–100, in steps of 10) is the chance of
+  at least 0.1 mm during the hour. It comes from DMI's ensemble (`harmonie_dini_eps_percentiles`): the
+  spread of 1-hour precipitation over the ensemble members is read as a distribution, and the chance of
+  exceeding 0.1 mm is interpolated from it. The daily value is the highest hourly chance that day (an
+  approximation). This costs one extra request per update. If it fails, the forecast is still returned,
+  with `None` here. Turn it off with `include_precipitation_probability=False`.
 - **Current conditions**: `fc.current()` interpolates instantaneous values (temperature,
   pressure, humidity, wind, cloud cover, radiation) linearly between the two hourly steps
   around now, so values change smoothly through the hour. Wind direction takes the shortest
