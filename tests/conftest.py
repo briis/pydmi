@@ -102,7 +102,8 @@ def _station(sid, name, lon, lat, params, *, type_="Synop", valid_to=None, statu
 
 
 FULL = ["temp_dry", "temp_dew", "humidity", "pressure_at_sea", "wind_speed", "wind_dir",
-        "wind_max", "precip_past10min", "precip_past1h", "cloud_cover", "visibility"]
+        "wind_max", "precip_past10min", "precip_past1h", "cloud_cover", "visibility",
+        "visib_mean_last10min"]
 
 
 def make_stations() -> dict:
@@ -128,7 +129,7 @@ def make_observations(station_id: str, now: datetime) -> dict:
     values = {
         "06170": {"temp_dry": 6.6, "temp_dew": 3.3, "humidity": 79.2, "pressure_at_sea": 1021.1,
                   "wind_speed": 2.57, "wind_dir": 122.0, "wind_max": 3.6, "precip_past10min": 0.0,
-                  "cloud_cover": 100.0, "visibility": 22400.0},
+                  "cloud_cover": 100.0, "visib_mean_last10min": 22400.0},
         "06188": {"temp_dry": 6.1, "radia_glob": 42.0, "sun_last10min_glob": 0.0},
     }[station_id]
     feats = []

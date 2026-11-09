@@ -105,3 +105,10 @@ async def test_async_observations(fake_dmi):
         obs = await client.get_observations()
     assert obs.wind_gust_ms == 3.6
     assert client.stations["global_radiation_wm2"].station_id == "06188"
+
+
+def test_visibility_from_10_minute_mean():
+    now = datetime.now(UTC)
+    chosen = select_stations(parse_stations(make_stations(), *HOME))
+    per = {sid: parse_observations(make_observations(sid, now)) for sid in ("06170", "06188")}
+    assert build_observations(chosen, per, now).visibility_m == 22400.0

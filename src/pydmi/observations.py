@@ -29,7 +29,9 @@ OBSERVATION_PARAMETERS: dict[str, str] = {
     "precipitation_10min_mm": "precip_past10min",
     "precipitation_1h_mm": "precip_past1h",
     "cloud_cover_pct": "cloud_cover",
-    "visibility_m": "visibility",
+    # "visibility" is listed by stations but not reported every 10 minutes;
+    # the 10-minute mean is (verified against Roskilde Lufthavn, 2026-11-09).
+    "visibility_m": "visib_mean_last10min",
     "global_radiation_wm2": "radia_glob",
     "sunshine_10min_min": "sun_last10min_glob",
 }
