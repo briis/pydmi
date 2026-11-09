@@ -138,3 +138,9 @@ def fake_dmi():
     state.base_url = f"http://127.0.0.1:{server.server_port}/v1/forecastedr"
     yield state
     server.shutdown()
+
+
+@pytest.fixture(autouse=True)
+def no_request_spacing(monkeypatch):
+    """Skip the 2 s pause between forecast and ensemble requests in tests."""
+    monkeypatch.setattr(c, "REQUEST_SPACING_S", 0.0)

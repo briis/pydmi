@@ -95,3 +95,41 @@ async def test_async_includes_probability(fake_dmi):
     async with DMIForecastAsync(55.64, 12.08, base_url=fake_dmi.base_url) as client:
         fc = await client.get_forecast()
     assert any(h.precipitation_probability_pct == 40 for h in fc.all_hours)
+
+
+def _eps_requests(fake):
+    return [r for r in fake.requests if "harmonie_dini_eps" in r[0]]
+
+
+def test_probability_retried_alone_after_failure(fake_dmi):
+    from datetime import datetime, timedelta, timezone
+
+    fake_dmi.eps_status = 429
+    client = DMIForecast(55.64, 12.08, base_url=fake_dmi.base_url)
+    fc = client.get_forecast()
+    assert client.probability_pending
+    assert all(h.precipitation_probability_pct is None for h in fc.all_hours)
+
+    # before the retry time: no new requests at all
+    client._blocked_until = None
+    client.get_forecast()
+    assert len(_eps_requests(fake_dmi)) == 1
+
+    # after the retry time: only the ensemble is fetched again, forecast from cache
+    fake_dmi.eps_status = 200
+    client._probability_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    fc = client.get_forecast()
+    assert len(fake_dmi.main_requests) == 1
+    assert len(_eps_requests(fake_dmi)) == 2
+    assert not client.probability_pending
+    assert any(h.precipitation_probability_pct == 40 for h in fc.all_hours)
+
+
+def test_probabilities_reused_between_forecast_updates(fake_dmi):
+    client = DMIForecast(55.64, 12.08, base_url=fake_dmi.base_url)
+    client.get_forecast()
+    fc = client.get_forecast(force=True)  # new forecast, ensemble still fresh
+    assert len(fake_dmi.main_requests) == 2
+    assert len(_eps_requests(fake_dmi)) == 1
+    assert any(h.precipitation_probability_pct == 40 for h in fc.all_hours)
+

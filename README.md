@@ -94,8 +94,10 @@ Wherever the data is shown, you must credit DMI. Use `pydmi.ATTRIBUTION`
   at least 0.1 mm during the hour. It comes from DMI's ensemble (`harmonie_dini_eps_percentiles`): the
   spread of 1-hour precipitation over the ensemble members is read as a distribution, and the chance of
   exceeding 0.1 mm is interpolated from it. The daily value is the highest hourly chance that day (an
-  approximation). This costs one extra request per update. If it fails, the forecast is still returned,
-  with `None` here. Turn it off with `include_precipitation_probability=False`.
+  approximation). The ensemble is fetched at most once an hour (it changes every few hours) and reused for
+  every forecast update in between, 2 seconds after the forecast request. If it fails, the forecast is
+  still returned with `None` here, and only the ensemble is retried after 5 minutes
+  (`client.probability_pending` is `True` meanwhile). Turn it off with `include_precipitation_probability=False`.
 - **Current conditions**: `fc.current()` interpolates instantaneous values (temperature,
   pressure, humidity, wind, cloud cover, radiation) linearly between the two hourly steps
   around now, so values change smoothly through the hour. Wind direction takes the shortest

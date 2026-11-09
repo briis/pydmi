@@ -59,6 +59,11 @@ class _ForecastClientBase:
 
         self._cache: Forecast | None = None
         self._blocked_until: datetime | None = None
+        # Ensemble (chance of precipitation), cached separately from the forecast.
+        self._probabilities: dict[datetime, float] | None = None
+        self._probabilities_fetched: datetime | None = None
+        self._probability_retry_at: datetime | None = None
+        self.request_spacing = c.REQUEST_SPACING_S
 
     # -- request ---------------------------------------------------------
     def _position_url(self, collection: str, parameters: Iterable[str]) -> str:
@@ -117,6 +122,35 @@ class _ForecastClientBase:
             raise DMIRequestError(status, "Request too large - ask for fewer parameters")
         if status >= 400:
             raise DMIRequestError(status, body[:300] or "error")
+
+    # -- ensemble bookkeeping -------------------------------------------------
+    @property
+    def probability_pending(self) -> bool:
+        """True while the chance of precipitation is wanted but not yet available.
+
+        Callers may poll more often meanwhile; only the ensemble request is retried,
+        at most every PROBABILITY_RETRY_INTERVAL.
+        """
+        return self.include_precipitation_probability and self._probabilities is None
+
+    def _probability_due(self, now: datetime) -> bool:
+        if not self.include_precipitation_probability:
+            return False
+        if self._probabilities is None:
+            return self._probability_retry_at is None or now >= self._probability_retry_at
+        assert self._probabilities_fetched is not None
+        return now - self._probabilities_fetched >= c.PROBABILITY_UPDATE_INTERVAL
+
+    def _probability_ok(self, probabilities: dict[datetime, float], now: datetime) -> None:
+        self._probabilities = probabilities
+        self._probabilities_fetched = now
+        self._probability_retry_at = None
+
+    def _probability_failed(self, now: datetime) -> None:
+        retry = now + c.PROBABILITY_RETRY_INTERVAL
+        if self._blocked_until and self._blocked_until > retry:
+            retry = self._blocked_until
+        self._probability_retry_at = retry
 
     def _store(self, forecast: Forecast) -> Forecast:
         self._cache = forecast

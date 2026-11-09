@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Final
 
-__version__: Final = "0.3.0"
+__version__: Final = "0.3.1"
 
 # DMI moved the open data APIs to opendataapi.dmi.dk and dropped API keys.
 # The old host (dmigw.govcloud.dk) still requires a key - do not use it.
@@ -66,6 +66,14 @@ P_EPS_PRECIP_1H: Final = "total-precipitation-1h-{p}percentile"
 # for the weather icon: a 30 % chance of rain with a cloud icon is normal.
 POP_THRESHOLD_MM: Final = 0.1
 POP_ROUND_TO: Final = 10  # percentiles only give coarse resolution
+# The ensemble changes every few hours: fetch it at most this often and reuse it
+# for every forecast update in between.
+PROBABILITY_UPDATE_INTERVAL: Final = timedelta(minutes=60)
+# After a failed ensemble request, retry only that request after this delay.
+PROBABILITY_RETRY_INTERVAL: Final = timedelta(minutes=5)
+# Pause between the forecast request and the ensemble request. DMI answers
+# back-to-back requests with 429 "Server is busy".
+REQUEST_SPACING_S: Final = 2.0
 
 # DMI precipitation-type index -> name
 PRECIPITATION_TYPES: Final = {

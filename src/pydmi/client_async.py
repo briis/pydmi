@@ -16,6 +16,7 @@ except ImportError as err:  # pragma: no cover
         "The async client needs aiohttp: pip install 'pydmi-weather[async]'"
     ) from err
 
+from . import const as c
 from ._base import _ForecastClientBase
 from .exceptions import DMIConnectionError, DMIError, DMIParseError
 from .models import Forecast
@@ -57,20 +58,30 @@ class DMIForecastAsync(_ForecastClientBase):
             now = datetime.now(timezone.utc)
             if (blocked := self._check_blocked(now)) is not None:
                 return blocked
-            if not force and self._cache_valid(now):
+            fetched_forecast = False
+            if force or not self._cache_valid(now):
+                data = await self._request(self.url)
+                forecast = self._store(parse_coverage(data, collection=self.collection))
+                fetched_forecast = True
+            else:
                 assert self._cache is not None
-                return self._cache
-            data = await self._request(self.url)
-            forecast = self._store(parse_coverage(data, collection=self.collection))
-            if self.include_precipitation_probability:
+                forecast = self._cache
+            if self._probability_due(now):
                 # Optional extra: a failure here never costs the main forecast.
+                if fetched_forecast:
+                    await asyncio.sleep(self.request_spacing)
                 try:
-                    probs = parse_precipitation_probability(
-                        await self._request(self.probability_url)
-                    )
-                    apply_precipitation_probability(forecast, probs)
+                    probs = parse_precipitation_probability(await self._request(self.probability_url))
+                    self._probability_ok(probs, now)
                 except DMIError as err:
-                    _LOGGER.warning("DMI chance of precipitation unavailable: %s", err)
+                    self._probability_failed(now)
+                    _LOGGER.warning(
+                        "DMI chance of precipitation unavailable, retrying in %s: %s",
+                        c.PROBABILITY_RETRY_INTERVAL,
+                        err,
+                    )
+            if self._probabilities is not None:
+                apply_precipitation_probability(forecast, self._probabilities)
             return forecast
 
     async def _request(self, url: str) -> dict[str, Any]:
