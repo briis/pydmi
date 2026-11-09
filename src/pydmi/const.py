@@ -5,13 +5,13 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Final
 
-__version__: Final = "0.3.1"
+__version__: Final = "0.4.0"
 
 # DMI moved the open data APIs to opendataapi.dmi.dk and dropped API keys.
 # The old host (dmigw.govcloud.dk) still requires a key - do not use it.
 API_HOST: Final = "https://opendataapi.dmi.dk"
 FORECAST_BASE_URL: Final = f"{API_HOST}/v1/forecastedr"
-# Future: METOBS_BASE_URL = f"{API_HOST}/v2/metObs" (current observations)
+METOBS_BASE_URL: Final = f"{API_HOST}/v2/metObs"
 
 # HARMONIE DINI surface model: ~2 km grid, hourly steps, ~60 h forecast,
 # new run every 3 hours (00, 03, 06 ... 21 UTC).
@@ -133,3 +133,20 @@ COND_SNOWY_RAINY: Final = "snowy-rainy"
 COND_SUNNY: Final = "sunny"
 COND_WINDY: Final = "windy"
 COND_WINDY_VARIANT: Final = "windy-variant"
+
+# --- Observations (metObs) ------------------------------------------------
+# Stations report every 10 minutes.
+OBS_UPDATE_INTERVAL: Final = timedelta(minutes=10)
+OBS_MIN_UPDATE_INTERVAL: Final = timedelta(minutes=5)
+# The station list rarely changes - fetch it once a day.
+OBS_STATIONS_UPDATE_INTERVAL: Final = timedelta(hours=24)
+# Only full weather stations. Road-weather and rain-only stations are left out
+# so e.g. road-surface-influenced temperatures do not slip in.
+OBS_STATION_TYPES: Final = frozenset({"Synop"})
+# Search area around the location for stations (degrees), and the farthest
+# station we are willing to use for a measurement.
+OBS_SEARCH_DLAT: Final = 0.6
+OBS_SEARCH_DLON: Final = 1.0
+OBS_MAX_DISTANCE_KM: Final = 50.0
+# A value older than this counts as missing (station down, sensor fault).
+OBS_MAX_AGE: Final = timedelta(hours=1)

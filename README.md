@@ -7,7 +7,7 @@ Python wrapper for the **free** Open Data APIs from DMI (Danmarks Meteorologiske
 | API | Status |
 |---|---|
 | [Forecast Data EDR API](https://www.dmi.dk/friedata/dokumentation/forecast-data-edr-api) | ✅ `DMIForecast` / `DMIForecastAsync` |
-| [Meteorological Observations API](https://www.dmi.dk/friedata/dokumentation/meteorological-observation-api) | planned (current conditions for the HA weather entity) |
+| [Meteorological Observations API](https://www.dmi.dk/friedata/dokumentation/meteorological-observation-api) | ✅ `DMIObservations` / `DMIObservationsAsync` |
 
 - HARMONIE DINI model: ~2 km grid, hourly steps, ~60 h ahead, new run every 3 hours
 - **Sync client**: standard library only, thread-safe. Use it in services like WeatherDataLogger.
@@ -57,6 +57,28 @@ async with DMIForecastAsync(55.64, 12.08, session=session) as dmi:
 
 See `examples/` for an MQTT publisher (WeatherDataLogger style) and a Home Assistant
 coordinator and weather entity.
+
+### Observations
+
+```python
+from pydmi import DMIObservations
+
+obs = DMIObservations(55.74, 12.15).get_observations()   # cached for 10 min
+print(obs.temperature_c, obs.wind_speed_ms, obs.global_radiation_wm2)
+print(obs.values["temperature_c"].station_name, obs.values["temperature_c"].observed)
+payload = obs.to_dict()                                   # values + where/when each came from
+```
+
+For each measurement, the nearest active **Synop** station that measures it is used (within 50 km).
+That can be different stations for different values: near Roskilde, temperature and wind come from
+Roskilde Lufthavn, solar radiation from Sjælsmark. The station list is fetched once a day, then one
+request per station every 10 minutes, 2 seconds apart. A value older than one hour counts as missing.
+If one station fails, values from the others are still returned.
+
+Fields: `temperature_c`, `dew_point_c`, `humidity_pct`, `pressure_hpa` (sea level), `wind_speed_ms`
+(10-min mean), `wind_bearing_deg`, `wind_gust_ms` (highest gust last 10 min), `precipitation_10min_mm`,
+`precipitation_1h_mm`, `cloud_cover_pct`, `visibility_m`, `global_radiation_wm2`, `sunshine_10min_min`.
+The async client is `pydmi.client_async.DMIObservationsAsync`.
 
 ## Respecting the free service
 

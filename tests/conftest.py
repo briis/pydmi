@@ -90,12 +90,67 @@ def eps() -> dict:
     return make_eps()
 
 
+def _station(sid, name, lon, lat, params, *, type_="Synop", valid_to=None, status="Active"):
+    return {
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [lon, lat]},
+        "properties": {
+            "stationId": sid, "name": name, "type": type_, "status": status,
+            "validFrom": "2019-01-01T00:00:00Z", "validTo": valid_to, "parameterId": params,
+        },
+    }
+
+
+FULL = ["temp_dry", "temp_dew", "humidity", "pressure_at_sea", "wind_speed", "wind_dir",
+        "wind_max", "precip_past10min", "precip_past1h", "cloud_cover", "visibility"]
+
+
+def make_stations() -> dict:
+    """Around Gundsømagle: Roskilde Lufthavn (no radiation) and Sjælsmark (radiation),
+    plus a closed period, a road station and a far-away station that must be ignored."""
+    return {"type": "FeatureCollection", "features": [
+        _station("06170", "Roskilde Lufthavn", 12.1366, 55.5867, FULL,
+                 valid_to="2025-10-29T10:31:40Z"),  # old period of the same station
+        _station("06170", "Roskilde Lufthavn", 12.1363, 55.5868, FULL),
+        _station("06188", "Sjælsmark", 12.4121, 55.8764,
+                 [*FULL, "radia_glob", "sun_last10min_glob"]),
+        _station("06160", "Flyvestation Værløse", 12.3289, 55.7668, FULL,
+                 valid_to="2006-08-18T00:00:00Z"),  # closed
+        _station("20001", "Road sensor", 12.15, 55.73, ["temp_dry"], type_="GIWS"),  # nearest, wrong type
+        _station("06019", "Far away", 9.0, 57.0, FULL),
+    ]}
+
+
+def make_observations(station_id: str, now: datetime) -> dict:
+    """Latest hour for a station: two 10-minute timestamps, newest wins."""
+    newest = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % 10 + 2)
+    older = newest - timedelta(minutes=10)
+    values = {
+        "06170": {"temp_dry": 6.6, "temp_dew": 3.3, "humidity": 79.2, "pressure_at_sea": 1021.1,
+                  "wind_speed": 2.57, "wind_dir": 122.0, "wind_max": 3.6, "precip_past10min": 0.0,
+                  "cloud_cover": 100.0, "visibility": 22400.0},
+        "06188": {"temp_dry": 6.1, "radia_glob": 42.0, "sun_last10min_glob": 0.0},
+    }[station_id]
+    feats = []
+    for when, delta in ((older, -0.5), (newest, 0.0)):
+        for param, val in values.items():
+            feats.append({"type": "Feature", "properties": {
+                "stationId": station_id, "parameterId": param, "value": val + delta,
+                "observed": when.strftime("%Y-%m-%dT%H:%M:%SZ")}})
+    if station_id == "06170":  # hourly parameter only at the full hour
+        feats.append({"type": "Feature", "properties": {
+            "stationId": "06170", "parameterId": "precip_past1h", "value": 0.2,
+            "observed": newest.replace(minute=0).strftime("%Y-%m-%dT%H:%M:%SZ")}})
+    return {"type": "FeatureCollection", "features": feats}
+
+
 class FakeDMI:
     def __init__(self) -> None:
         self.status = 200
         self.retry_after: str | None = None
         self.body = json.dumps(make_coverage()).encode()
         self.eps_status = 200
+        self.obs_status: dict[str, int] = {}
         self.eps_body = json.dumps(make_eps()).encode()
         self.requests: list[tuple[str, dict]] = []
 
@@ -114,6 +169,15 @@ def fake_dmi():
             state.requests.append((self.path, dict(self.headers)))
             is_eps = "harmonie_dini_eps_percentiles" in self.path
             status = state.eps_status if is_eps else state.status
+            if "/metObs/" in self.path:
+                from urllib.parse import parse_qs, urlparse
+
+                q = parse_qs(urlparse(self.path).query)
+                sid = q.get("stationId", [""])[0]
+                status = state.obs_status.get(sid or "stations", 200)
+                body_obj = (
+                    make_observations(sid, datetime.now(timezone.utc)) if sid else make_stations()
+                )
             if status != 200:
                 self.send_response(status)
                 if state.retry_after:
@@ -121,7 +185,10 @@ def fake_dmi():
                 self.end_headers()
                 self.wfile.write(b"nope")
                 return
-            body = gzip.compress(state.eps_body if is_eps else state.body)
+            if "/metObs/" in self.path:
+                body = gzip.compress(json.dumps(body_obj).encode())
+            else:
+                body = gzip.compress(state.eps_body if is_eps else state.body)
             self.send_response(200)
             self.send_header("Content-Type", "application/prs.coverage+json")
             self.send_header("Content-Encoding", "gzip")
@@ -136,6 +203,7 @@ def fake_dmi():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     state.base_url = f"http://127.0.0.1:{server.server_port}/v1/forecastedr"
+    state.metobs_url = f"http://127.0.0.1:{server.server_port}/v2/metObs"
     yield state
     server.shutdown()
 

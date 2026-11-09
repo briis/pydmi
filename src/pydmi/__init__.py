@@ -1,6 +1,6 @@
 """pydmi - Python wrapper for DMI's free Open Data APIs.
 
-Currently: Forecast EDR API (HARMONIE DINI). Planned: meteorological observations.
+Forecast EDR API (HARMONIE DINI) and Meteorological Observation API (metObs).
 
     from pydmi import DMIForecast           # stdlib only, blocking
     from pydmi.client_async import DMIForecastAsync  # needs aiohttp
@@ -8,7 +8,7 @@ Currently: Forecast EDR API (HARMONIE DINI). Planned: meteorological observation
 Data: DMI Open Data, CC BY 4.0 - always show `ATTRIBUTION` with the data.
 """
 
-from .client_sync import DMIForecast
+from .client_sync import DMIForecast, DMIObservations
 from .const import ATTRIBUTION, DEFAULT_PARAMETERS, LICENSE_URL, __version__
 from .exceptions import (
     DMIConnectionError,
@@ -19,15 +19,18 @@ from .exceptions import (
     DMIRequestError,
 )
 from .models import Forecast, ForecastDay, ForecastHour
+from .observations import OBSERVATION_PARAMETERS, Observations, ObservedValue, Station
 from .parser import derive_condition, parse_coverage
 
 __all__ = [
     "ATTRIBUTION",
     "DEFAULT_PARAMETERS",
     "LICENSE_URL",
+    "OBSERVATION_PARAMETERS",
     "DMIConnectionError",
     "DMIError",
     "DMIForecast",
+    "DMIObservations",
     "DMIInvalidLocationError",
     "DMIParseError",
     "DMIRateLimitError",
@@ -35,6 +38,9 @@ __all__ = [
     "Forecast",
     "ForecastDay",
     "ForecastHour",
+    "Observations",
+    "ObservedValue",
+    "Station",
     "__version__",
     "derive_condition",
     "parse_coverage",

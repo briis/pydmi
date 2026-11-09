@@ -22,7 +22,36 @@ def parse_retry_after(value: str | None) -> float:
     return c.DEFAULT_RETRY_AFTER.total_seconds()
 
 
-class _ForecastClientBase:
+class _FairUseMixin:
+    """Request headers and 429/4xx handling shared by all DMI clients.
+
+    Subclasses set: user_agent, timeout, _blocked_until.
+    """
+
+    user_agent: str
+    timeout: float
+    _blocked_until: datetime | None
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return {
+            "User-Agent": self.user_agent,
+            "Accept": "application/prs.coverage+json, application/json",
+            "Accept-Encoding": "gzip",
+        }
+
+    def _handle_status(self, status: int, retry_after: str | None, body: str) -> None:
+        if status == 429:
+            wait = parse_retry_after(retry_after)
+            self._blocked_until = datetime.now(timezone.utc) + timedelta(seconds=wait)
+            raise DMIRateLimitError(wait, header=retry_after, body=body[:300])
+        if status == 413:
+            raise DMIRequestError(status, "Request too large - ask for fewer parameters")
+        if status >= 400:
+            raise DMIRequestError(status, body[:300] or "error")
+
+
+class _ForecastClientBase(_FairUseMixin):
     """Holds configuration, cache and back-off state."""
 
     def __init__(
@@ -88,14 +117,6 @@ class _ForecastClientBase:
             (c.P_EPS_PRECIP_1H.format(p=p) for p in c.EPS_PERCENTILES),
         )
 
-    @property
-    def headers(self) -> dict[str, str]:
-        return {
-            "User-Agent": self.user_agent,
-            "Accept": "application/prs.coverage+json, application/json",
-            "Accept-Encoding": "gzip",
-        }
-
     # -- cache / fair use -------------------------------------------------
     @property
     def cached(self) -> Forecast | None:
@@ -112,16 +133,6 @@ class _ForecastClientBase:
                 return self._cache
             raise DMIRateLimitError((self._blocked_until - now).total_seconds())
         return None
-
-    def _handle_status(self, status: int, retry_after: str | None, body: str) -> None:
-        if status == 429:
-            wait = parse_retry_after(retry_after)
-            self._blocked_until = datetime.now(timezone.utc) + timedelta(seconds=wait)
-            raise DMIRateLimitError(wait, header=retry_after, body=body[:300])
-        if status == 413:
-            raise DMIRequestError(status, "Request too large - ask for fewer parameters")
-        if status >= 400:
-            raise DMIRequestError(status, body[:300] or "error")
 
     # -- ensemble bookkeeping -------------------------------------------------
     @property
