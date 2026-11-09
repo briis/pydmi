@@ -145,6 +145,27 @@ def make_observations(station_id: str, now: datetime) -> dict:
     return {"type": "FeatureCollection", "features": feats}
 
 
+def make_lightning(now: datetime, lat: float = 55.7357, lon: float = 12.1516) -> dict:
+    """Strikes around the location: north 10 km (5 min ago), east 30 km (40 min ago),
+    and one in the corner of the box but outside a 50 km circle."""
+    def strike(dlat_km, dlon_km, minutes_ago, amp, type_="0.0"):
+        import math
+        return {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [
+                lon + dlon_km / (111.32 * math.cos(math.radians(lat))), lat + dlat_km / 111.32]},
+            "properties": {
+                "observed": (now - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "amp": amp, "strokes": 2, "type": type_, "sensors": "1,2,3",
+            },
+        }
+    return {"type": "FeatureCollection", "features": [
+        strike(30, 0, 5, -12.4),       # north, 30 km, newest
+        strike(0, 10, 40, 8.1, 1),     # east, 10 km, nearest
+        strike(45, 45, 20, -3.0),      # NE corner, ~64 km: outside the circle
+    ]}
+
+
 class FakeDMI:
     def __init__(self) -> None:
         self.status = 200
@@ -170,7 +191,10 @@ def fake_dmi():
             state.requests.append((self.path, dict(self.headers)))
             is_eps = "harmonie_dini_eps_percentiles" in self.path
             status = state.eps_status if is_eps else state.status
-            if "/metObs/" in self.path:
+            if "/lightningdata/" in self.path:
+                status = state.obs_status.get("lightning", 200)
+                body_obj = make_lightning(datetime.now(timezone.utc))
+            elif "/metObs/" in self.path:
                 from urllib.parse import parse_qs, urlparse
 
                 q = parse_qs(urlparse(self.path).query)
@@ -186,7 +210,7 @@ def fake_dmi():
                 self.end_headers()
                 self.wfile.write(b"nope")
                 return
-            if "/metObs/" in self.path:
+            if "/metObs/" in self.path or "/lightningdata/" in self.path:
                 body = gzip.compress(json.dumps(body_obj).encode())
             else:
                 body = gzip.compress(state.eps_body if is_eps else state.body)
@@ -205,6 +229,7 @@ def fake_dmi():
     thread.start()
     state.base_url = f"http://127.0.0.1:{server.server_port}/v1/forecastedr"
     state.metobs_url = f"http://127.0.0.1:{server.server_port}/v2/metObs"
+    state.lightning_url = f"http://127.0.0.1:{server.server_port}/v2/lightningdata"
     yield state
     server.shutdown()
 

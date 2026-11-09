@@ -5,13 +5,14 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Final
 
-__version__: Final = "0.4.0"
+__version__: Final = "0.5.0"
 
 # DMI moved the open data APIs to opendataapi.dmi.dk and dropped API keys.
 # The old host (dmigw.govcloud.dk) still requires a key - do not use it.
 API_HOST: Final = "https://opendataapi.dmi.dk"
 FORECAST_BASE_URL: Final = f"{API_HOST}/v1/forecastedr"
 METOBS_BASE_URL: Final = f"{API_HOST}/v2/metObs"
+LIGHTNING_BASE_URL: Final = f"{API_HOST}/v2/lightningdata"
 
 # HARMONIE DINI surface model: ~2 km grid, hourly steps, ~60 h forecast,
 # new run every 3 hours (00, 03, 06 ... 21 UTC).
@@ -74,6 +75,12 @@ PROBABILITY_RETRY_INTERVAL: Final = timedelta(minutes=5)
 # Pause between the forecast request and the ensemble request. DMI answers
 # back-to-back requests with 429 "Server is busy".
 REQUEST_SPACING_S: Final = 2.0
+# The ensemble request is heavier (7 percentiles x ~55 h) and DMI's ensemble
+# service is sometimes slow: give it more time than other requests.
+PROBABILITY_TIMEOUT_S: Final = 60.0
+# Only warn after this many consecutive ensemble failures (~15 min); a single
+# failure that recovers on the next attempt is logged at debug level.
+PROBABILITY_WARN_AFTER: Final = 3
 
 # DMI precipitation-type index -> name
 PRECIPITATION_TYPES: Final = {
@@ -150,3 +157,11 @@ OBS_SEARCH_DLON: Final = 1.0
 OBS_MAX_DISTANCE_KM: Final = 50.0
 # A value older than this counts as missing (station down, sensor fault).
 OBS_MAX_AGE: Final = timedelta(hours=1)
+
+# --- Lightning ------------------------------------------------------------
+LIGHTNING_RADIUS_KM: Final = 50.0
+LIGHTNING_MAX_RADIUS_KM: Final = 300.0
+LIGHTNING_UPDATE_INTERVAL: Final = timedelta(minutes=5)
+LIGHTNING_MIN_UPDATE_INTERVAL: Final = timedelta(minutes=2)
+# Strikes per request (last hour inside the box). Plenty even in a big storm.
+LIGHTNING_LIMIT: Final = 10000

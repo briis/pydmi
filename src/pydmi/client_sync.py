@@ -17,6 +17,7 @@ from typing import Any
 from . import const as c
 from ._base import _ForecastClientBase
 from .exceptions import DMIConnectionError, DMIError, DMIParseError, DMIRateLimitError
+from .lightning import Lightning, _LightningClientBase
 from .models import Forecast
 from .observations import (
     Observations,
@@ -36,10 +37,10 @@ _LOGGER = logging.getLogger(__name__)
 class _SyncRequester:
     """Blocking GET of a DMI JSON document (stdlib only)."""
 
-    def _request(self, url: str) -> dict[str, Any]:
+    def _request(self, url: str, timeout: float | None = None) -> dict[str, Any]:
         req = urllib.request.Request(url, headers=self.headers)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
                 raw = resp.read()
                 if resp.headers.get("Content-Encoding") == "gzip":
                     raw = gzip.decompress(raw)
@@ -81,12 +82,16 @@ class DMIForecast(_SyncRequester, _ForecastClientBase):
                 if fetched_forecast:
                     time.sleep(self.request_spacing)
                 try:
-                    probs = parse_precipitation_probability(self._request(self.probability_url))
+                    probs = parse_precipitation_probability(
+                        self._request(self.probability_url, timeout=self.probability_timeout)
+                    )
                     self._probability_ok(probs, now)
                 except DMIError as err:
-                    self._probability_failed(now)
-                    _LOGGER.warning(
-                        "DMI chance of precipitation unavailable, retrying in %s: %s",
+                    failures = self._probability_failed(now)
+                    _LOGGER.log(
+                        logging.WARNING if failures >= c.PROBABILITY_WARN_AFTER else logging.DEBUG,
+                        "DMI chance of precipitation unavailable (attempt %s), retrying in %s: %s",
+                        failures,
                         c.PROBABILITY_RETRY_INTERVAL,
                         err,
                     )
@@ -140,3 +145,22 @@ class DMIObservations(_SyncRequester, _ObservationClientBase):
             if not per_station and last_error is not None:
                 raise last_error
             return self._store(build_observations(self._chosen, per_station, now))
+
+
+class DMILightning(_SyncRequester, _LightningClientBase):
+    """Synchronous client for lightning strikes near a location (thread-safe)."""
+
+    def __init__(self, latitude: float, longitude: float, **kwargs: Any) -> None:
+        super().__init__(latitude, longitude, **kwargs)
+        self._lock = threading.Lock()
+
+    def get_lightning(self, *, force: bool = False) -> Lightning:
+        """Strikes within the radius in the last hour, cached for `update_interval`."""
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            if (blocked := self._check_blocked(now)) is not None:
+                return blocked
+            if not force and self._cache_valid(now):
+                assert self._cache is not None
+                return self._cache
+            return self._store(self._parse(self._request(self.url), now))

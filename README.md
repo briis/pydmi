@@ -8,6 +8,7 @@ Python wrapper for the **free** Open Data APIs from DMI (Danmarks Meteorologiske
 |---|---|
 | [Forecast Data EDR API](https://www.dmi.dk/friedata/dokumentation/forecast-data-edr-api) | ✅ `DMIForecast` / `DMIForecastAsync` |
 | [Meteorological Observations API](https://www.dmi.dk/friedata/dokumentation/meteorological-observation-api) | ✅ `DMIObservations` / `DMIObservationsAsync` |
+| [Lightning Data API](https://www.dmi.dk/friedata/dokumentation/lightning-data-api) | ✅ `DMILightning` / `DMILightningAsync` |
 
 - HARMONIE DINI model: ~2 km grid, hourly steps, ~60 h ahead, new run every 3 hours
 - **Sync client**: standard library only, thread-safe. Use it in services like WeatherDataLogger.
@@ -80,6 +81,24 @@ Fields: `temperature_c`, `dew_point_c`, `humidity_pct`, `pressure_hpa` (sea leve
 `precipitation_1h_mm`, `cloud_cover_pct`, `visibility_m`, `global_radiation_wm2`, `sunshine_10min_min`.
 The async client is `pydmi.client_async.DMIObservationsAsync`.
 
+### Lightning
+
+```python
+from pydmi import DMILightning
+
+lt = DMILightning(55.74, 12.15, radius_km=50).get_lightning()   # cached for 5 min
+print(lt.count_1h, lt.count_10min)
+if lt.nearest:
+    print(lt.nearest.distance_km, "km at", lt.nearest.bearing_deg, "deg")
+if lt.latest:
+    print(lt.latest.observed, lt.latest.current_ka, "kA")
+```
+
+One request every 5 minutes for the last hour of strikes in a box around the location; strikes
+outside the radius (default 50 km, max 300 km) are dropped. `bearing_deg` is the direction from your
+location to the strike (0 = north, 90 = east). `type` is DMI's lightning type code, passed through
+unchanged (DMI does not document its values); all types are counted.
+
 ## Respecting the free service
 
 DMI Open Data is free to use, and the library is built to keep it that way:
@@ -119,7 +138,8 @@ Wherever the data is shown, you must credit DMI. Use `pydmi.ATTRIBUTION`
   approximation). The ensemble is fetched at most once an hour (it changes every few hours) and reused for
   every forecast update in between, 2 seconds after the forecast request. If it fails, the forecast is
   still returned with `None` here, and only the ensemble is retried after 5 minutes
-  (`client.probability_pending` is `True` meanwhile). Turn it off with `include_precipitation_probability=False`.
+  (`client.probability_pending` is `True` meanwhile). The ensemble request may take up to 60 seconds,
+  and a warning is only logged after 3 failed attempts in a row (before that, at debug level). Turn it off with `include_precipitation_probability=False`.
 - **Current conditions**: `fc.current()` interpolates instantaneous values (temperature,
   pressure, humidity, wind, cloud cover, radiation) linearly between the two hourly steps
   around now, so values change smoothly through the hour. Wind direction takes the shortest

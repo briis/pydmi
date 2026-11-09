@@ -133,3 +133,22 @@ def test_probabilities_reused_between_forecast_updates(fake_dmi):
     assert len(_eps_requests(fake_dmi)) == 1
     assert any(h.precipitation_probability_pct == 40 for h in fc.all_hours)
 
+
+
+def test_probability_warns_only_after_three_failures(fake_dmi, caplog):
+    import logging
+    from datetime import datetime, timedelta, timezone
+
+    fake_dmi.eps_status = 500
+    client = DMIForecast(55.64, 12.08, base_url=fake_dmi.base_url)
+    caplog.set_level(logging.DEBUG, logger="pydmi")
+    for _ in range(3):
+        client._probability_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        client.get_forecast()
+    levels = [r.levelno for r in caplog.records if "chance of precipitation" in r.getMessage()]
+    assert levels == [logging.DEBUG, logging.DEBUG, logging.WARNING]
+
+
+def test_probability_uses_longer_timeout():
+    assert DMIForecast(55.64, 12.08).probability_timeout == 60.0
+    assert DMIForecast(55.64, 12.08, timeout=90).probability_timeout == 90

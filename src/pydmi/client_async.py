@@ -19,6 +19,7 @@ except ImportError as err:  # pragma: no cover
 from . import const as c
 from ._base import _ForecastClientBase
 from .exceptions import DMIConnectionError, DMIError, DMIParseError, DMIRateLimitError
+from .lightning import Lightning, _LightningClientBase
 from .models import Forecast
 from .observations import (
     Observations,
@@ -46,14 +47,14 @@ class _AsyncRequester:
         self._own_session = session is None
         self._lock = asyncio.Lock()
 
-    async def _request(self, url: str) -> dict[str, Any]:
+    async def _request(self, url: str, timeout: float | None = None) -> dict[str, Any]:
         if self._session is None:
             self._session = aiohttp.ClientSession()
         try:
             async with self._session.get(
                 URL(url, encoded=True),
                 headers=self.headers,
-                timeout=aiohttp.ClientTimeout(total=self.timeout),
+                timeout=aiohttp.ClientTimeout(total=timeout or self.timeout),
             ) as resp:
                 if resp.status >= 400:
                     self._handle_status(
@@ -123,12 +124,16 @@ class DMIForecastAsync(_AsyncRequester, _ForecastClientBase):
                 if fetched_forecast:
                     await asyncio.sleep(self.request_spacing)
                 try:
-                    probs = parse_precipitation_probability(await self._request(self.probability_url))
+                    probs = parse_precipitation_probability(
+                        await self._request(self.probability_url, timeout=self.probability_timeout)
+                    )
                     self._probability_ok(probs, now)
                 except DMIError as err:
-                    self._probability_failed(now)
-                    _LOGGER.warning(
-                        "DMI chance of precipitation unavailable, retrying in %s: %s",
+                    failures = self._probability_failed(now)
+                    _LOGGER.log(
+                        logging.WARNING if failures >= c.PROBABILITY_WARN_AFTER else logging.DEBUG,
+                        "DMI chance of precipitation unavailable (attempt %s), retrying in %s: %s",
+                        failures,
                         c.PROBABILITY_RETRY_INTERVAL,
                         err,
                     )
@@ -192,3 +197,29 @@ class DMIObservationsAsync(_AsyncRequester, _ObservationClientBase):
             if not per_station and last_error is not None:
                 raise last_error
             return self._store(build_observations(self._chosen, per_station, now))
+
+
+class DMILightningAsync(_AsyncRequester, _LightningClientBase):
+    """Async client for lightning strikes near a location."""
+
+    def __init__(
+        self,
+        latitude: float,
+        longitude: float,
+        *,
+        session: aiohttp.ClientSession | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(latitude, longitude, **kwargs)
+        self._init_session(session)
+
+    async def get_lightning(self, *, force: bool = False) -> Lightning:
+        """Strikes within the radius in the last hour, cached for `update_interval`."""
+        async with self._lock:
+            now = datetime.now(timezone.utc)
+            if (blocked := self._check_blocked(now)) is not None:
+                return blocked
+            if not force and self._cache_valid(now):
+                assert self._cache is not None
+                return self._cache
+            return self._store(self._parse(await self._request(self.url), now))

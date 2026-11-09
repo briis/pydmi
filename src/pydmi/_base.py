@@ -93,6 +93,8 @@ class _ForecastClientBase(_FairUseMixin):
         self._probabilities_fetched: datetime | None = None
         self._probability_retry_at: datetime | None = None
         self.request_spacing = c.REQUEST_SPACING_S
+        self.probability_timeout = max(timeout, c.PROBABILITY_TIMEOUT_S)
+        self._probability_failures = 0
 
     # -- request ---------------------------------------------------------
     def _position_url(self, collection: str, parameters: Iterable[str]) -> str:
@@ -156,12 +158,16 @@ class _ForecastClientBase(_FairUseMixin):
         self._probabilities = probabilities
         self._probabilities_fetched = now
         self._probability_retry_at = None
+        self._probability_failures = 0
 
-    def _probability_failed(self, now: datetime) -> None:
+    def _probability_failed(self, now: datetime) -> int:
+        """Schedule a retry; returns the number of consecutive failures."""
+        self._probability_failures += 1
         retry = now + c.PROBABILITY_RETRY_INTERVAL
         if self._blocked_until and self._blocked_until > retry:
             retry = self._blocked_until
         self._probability_retry_at = retry
+        return self._probability_failures
 
     def _store(self, forecast: Forecast) -> Forecast:
         self._cache = forecast
