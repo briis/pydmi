@@ -7,6 +7,9 @@ on:
   release:
     types:
       - "published"
+  # Manual fallback (GitHub occasionally drops release events):
+  # Actions -> Release -> Run workflow -> "Use workflow from" = the tag, e.g. v0.2.1
+  workflow_dispatch:
 
 permissions: {}
 
@@ -32,7 +35,11 @@ jobs:
       - name: "Check that the tag matches __version__"
         shell: "bash"
         run: |
-          tag="${{ github.event.release.tag_name }}"
+          tag="${{ github.event.release.tag_name || github.ref_name }}"
+          if [ "${{ github.ref_type }}" != "tag" ] && [ -z "${{ github.event.release.tag_name }}" ]; then
+            echo "::error::Run this workflow from a tag (Use workflow from -> Tags -> vX.Y.Z), not a branch"
+            exit 1
+          fi
           tag="${tag#v}"
           version=$(python -c "import ast,pathlib;t=ast.parse(pathlib.Path('src/pydmi/const.py').read_text());print(next(n.value.value for n in ast.walk(t) if isinstance(n,ast.AnnAssign) and getattr(n.target,'id','')=='__version__'))")
           echo "Release tag: ${tag}  __version__: ${version}"
