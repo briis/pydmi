@@ -87,7 +87,9 @@ ATTRIBUTION: Final = "Data from DMI (Danmarks Meteorologiske Institut), CC BY 4.
 LICENSE_URL: Final = "https://www.dmi.dk/friedata/dokumentation/terms-of-use"
 
 # --- Condition thresholds (Home Assistant condition strings) --------------
-PRECIP_THRESHOLD_MM: Final = 0.1  # mm/h considered "precipitation"
+# mm/h needed for a rain/snow condition. 0.3 matches dmi.dk, which shows a
+# cloud (not rain) for hours with only a trace of precipitation.
+PRECIP_THRESHOLD_MM: Final = 0.3
 POURING_THRESHOLD_MM: Final = 4.0  # mm/h considered "pouring"
 # NB: DMI metadata says "0..1", but live values are in PERCENT (stable air gives
 # ~0.2-0.4, i.e. under half a percent). Verified 2026-11-09 against CAPE.

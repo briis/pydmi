@@ -84,7 +84,7 @@ Wherever the data is shown, you must credit DMI. Use `pydmi.ATTRIBUTION`
   amount expected *during that hour* (the Home Assistant / met.no convention). The last
   step is `None`.
 - **Condition**: the EDR API has no weather symbol, so one is derived. Priority order:
-  thunder (lightning probability ≥ 30 %; note DMI returns this in percent, although its metadata says 0..1), precipitation (≥ 0.1 mm/h, with rain, snow,
+  thunder (lightning probability ≥ 30 %; note DMI returns this in percent, although its metadata says 0..1), precipitation (≥ 0.3 mm/h, with rain, snow,
   sleet or hail taken from `precipitation-type`), fog (visibility < 1 km), wind
   (≥ 13.9 m/s), then cloud cover. Night uses `clear-night`. All thresholds are in `const.py`.
 - **Daily**: grouped by local date. Today covers the rest of the day. Later days with

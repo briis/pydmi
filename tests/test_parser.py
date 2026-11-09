@@ -131,12 +131,23 @@ def test_current_at_exact_hour(coverage):
 def test_condition_matches_rounded_precipitation():
     cov = make_coverage()
     acc = cov["ranges"]["total-precipitation"]["values"]
-    # 0.06 mm in the hour starting at step 2 -> shown as 0.1 mm -> must be rainy
+    # 0.26 mm in the hour starting at step 2 -> shown as 0.3 mm -> must be rainy
     for i in range(3, len(acc)):
-        acc[i] = acc[i] + 0.06
+        acc[i] = acc[i] + 0.26
     fc = parse_coverage(cov)
     h = fc.all_hours[2]
-    assert h.precipitation_mm == 0.1
+    assert h.precipitation_mm == 0.3
     assert h.condition == "rainy"
     now = h.datetime.replace(minute=20)
     assert fc.current(now).condition == fc.all_hours[2].condition
+
+
+def test_trace_precipitation_is_not_rain():
+    cov = make_coverage()
+    acc = cov["ranges"]["total-precipitation"]["values"]
+    for i in range(3, len(acc)):
+        acc[i] = acc[i] + 0.1  # 0.1 mm in one hour: a trace, dmi.dk shows a cloud
+    h = parse_coverage(cov).all_hours[2]
+    assert h.precipitation_mm == 0.1
+    assert h.condition == "clear-night"  # fixture: 10 % cloud at night - not "rainy"
+    assert h.precipitation_type is None
