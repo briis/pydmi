@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Final
 
-__version__: Final = "0.2.0"
+__version__: Final = "0.2.1"
 
 # DMI moved the open data APIs to opendataapi.dmi.dk and dropped API keys.
 # The old host (dmigw.govcloud.dk) still requires a key - do not use it.

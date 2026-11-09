@@ -126,3 +126,17 @@ def test_current_at_exact_hour(coverage):
     h0 = fc.all_hours[7]
     cur = fc.current(h0.datetime)
     assert cur.temperature_c == h0.temperature_c
+
+
+def test_condition_matches_rounded_precipitation():
+    cov = make_coverage()
+    acc = cov["ranges"]["total-precipitation"]["values"]
+    # 0.06 mm in the hour starting at step 2 -> shown as 0.1 mm -> must be rainy
+    for i in range(3, len(acc)):
+        acc[i] = acc[i] + 0.06
+    fc = parse_coverage(cov)
+    h = fc.all_hours[2]
+    assert h.precipitation_mm == 0.1
+    assert h.condition == "rainy"
+    now = h.datetime.replace(minute=20)
+    assert fc.current(now).condition == fc.all_hours[2].condition

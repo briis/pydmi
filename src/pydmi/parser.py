@@ -136,7 +136,9 @@ def parse_coverage(
         # Amount for the coming hour = acc[i+1] - acc[i]; last step is unknown.
         precip: float | None = None
         if i + 1 < n and acc[i] is not None and acc[i + 1] is not None:
-            precip = max(0.0, acc[i + 1] - acc[i])
+            # Round once, here, so the displayed amount, the condition and the
+            # interpolated "now" all use the same number (0.06 -> 0.1 -> rainy).
+            precip = round(max(0.0, acc[i + 1] - acc[i]), 1)
 
         p_type = None
         if precip is not None and precip >= c.PRECIP_THRESHOLD_MM and ptype[i] is not None:
@@ -164,7 +166,7 @@ def parse_coverage(
                 wind_speed_ms=_round(ws[i]),
                 wind_bearing_deg=_round(wd[i], 0),
                 wind_gust_ms=_round(gust[i]),
-                precipitation_mm=_round(precip),
+                precipitation_mm=precip,
                 precipitation_type=p_type,
                 cloud_cover_pct=_round(cloud_pct, 0),
                 visibility_m=_round(vis[i], 0),
