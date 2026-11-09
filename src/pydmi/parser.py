@@ -332,8 +332,8 @@ def _mean_bearing(bearings: Sequence[float], speeds: Sequence[float]) -> float |
     """Speed-weighted vector mean of wind directions."""
     if not bearings:
         return None
-    x = sum(s * math.sin(math.radians(b)) for b, s in zip(bearings, speeds))
-    y = sum(s * math.cos(math.radians(b)) for b, s in zip(bearings, speeds))
+    x = sum(s * math.sin(math.radians(b)) for b, s in zip(bearings, speeds, strict=True))
+    y = sum(s * math.cos(math.radians(b)) for b, s in zip(bearings, speeds, strict=True))
     if x == 0 and y == 0:
         return None
     return round(math.degrees(math.atan2(x, y)) % 360)
