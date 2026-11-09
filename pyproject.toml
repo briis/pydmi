@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pydmi-weather"
+dynamic = ["version"]
+description = "Python wrapper for DMI's free Open Data APIs (forecast now, observations later), sync and async"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Bjarne Riis" }]
+keywords = ["dmi", "weather", "forecast", "harmonie", "home-assistant"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Framework :: AsyncIO",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+dependencies = []  # the sync client is stdlib-only
+
+[project.optional-dependencies]
+async = ["aiohttp>=3.9"]
+test = ["pytest>=8", "pytest-asyncio>=0.23", "aiohttp>=3.9"]
+
+[project.urls]
+"Source" = "https://github.com/briis/pydmi"
+"DMI API docs" = "https://www.dmi.dk/friedata/dokumentation/forecast-data-edr-api"
+"DMI terms of use" = "https://www.dmi.dk/friedata/dokumentation/terms-of-use"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "pydmi.const.__version__" }
+
+[tool.setuptools.package-data]
+pydmi = ["py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

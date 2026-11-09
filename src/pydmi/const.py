@@ -1,0 +1,113 @@
+"""Constants for pydmi."""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Final
+
+__version__: Final = "0.1.1"
+
+# DMI moved the open data APIs to opendataapi.dmi.dk and dropped API keys.
+# The old host (dmigw.govcloud.dk) still requires a key - do not use it.
+API_HOST: Final = "https://opendataapi.dmi.dk"
+FORECAST_BASE_URL: Final = f"{API_HOST}/v1/forecastedr"
+# Future: METOBS_BASE_URL = f"{API_HOST}/v2/metObs" (current observations)
+
+# HARMONIE DINI surface model: ~2 km grid, hourly steps, ~60 h forecast,
+# new run every 3 hours (00, 03, 06 ... 21 UTC).
+DEFAULT_COLLECTION: Final = "harmonie_dini_sf"
+
+# Rough geographic extent of the DINI model (CRS84, from the collection metadata).
+DINI_BBOX: Final = (-43.17, 37.69, 40.07, 69.91)  # lon_min, lat_min, lon_max, lat_max
+
+# Parameters needed to build a normal weather forecast. Keep this list short:
+# every extra parameter is extra load on a free service.
+P_TEMPERATURE: Final = "temperature-2m"
+P_DEW_POINT: Final = "dew-point-temperature-2m"
+P_HUMIDITY: Final = "relative-humidity-2m"
+P_PRESSURE: Final = "pressure-sealevel"
+P_WIND_SPEED: Final = "wind-speed-10m"
+P_WIND_DIR: Final = "wind-dir-10m"
+P_WIND_GUST: Final = "gust-wind-speed-10m"
+P_PRECIP_ACC: Final = "total-precipitation"
+P_PRECIP_TYPE: Final = "precipitation-type"
+P_CLOUD_COVER: Final = "fraction-of-cloud-cover"
+P_VISIBILITY: Final = "visibility"
+P_LIGHTNING: Final = "probability-of-lightning"
+# NB: "global-radiation-flux" is labelled W m-2 but is ACCUMULATED J/m2 since the run
+# started (verified 2026-11-09). Use the instantaneous flux instead - same quantity
+# a weather station measures.
+P_GLOBAL_RADIATION: Final = "downward-short-wave-radiation-flux-instant"
+
+DEFAULT_PARAMETERS: Final = (
+    P_TEMPERATURE,
+    P_DEW_POINT,
+    P_HUMIDITY,
+    P_PRESSURE,
+    P_WIND_SPEED,
+    P_WIND_DIR,
+    P_WIND_GUST,
+    P_PRECIP_ACC,
+    P_PRECIP_TYPE,
+    P_CLOUD_COVER,
+    P_VISIBILITY,
+    P_LIGHTNING,
+    P_GLOBAL_RADIATION,
+)
+
+# DMI precipitation-type index -> name
+PRECIPITATION_TYPES: Final = {
+    0: "drizzle",
+    1: "rain",
+    2: "sleet",
+    3: "snow",
+    4: "freezing_drizzle",
+    5: "freezing_rain",
+    6: "graupel",
+    7: "hail",
+}
+
+# --- Fair use -------------------------------------------------------------
+# DMI's fair use limit is 500 requests / 5 s across ALL users of the free API.
+# A forecast model only changes every 3 hours, so polling often is pointless.
+DEFAULT_UPDATE_INTERVAL: Final = timedelta(minutes=30)
+MIN_UPDATE_INTERVAL: Final = timedelta(minutes=10)
+DEFAULT_RETRY_AFTER: Final = timedelta(seconds=60)  # used when 429 has no Retry-After
+DEFAULT_TIMEOUT: Final = 30  # seconds
+
+# Round coordinates before querying. 2 decimals ~ 1 km, finer than the 2 km grid,
+# so nothing is lost - and identical requests are easier for DMI to cache.
+COORDINATE_PRECISION: Final = 2
+
+USER_AGENT: Final = f"pydmi/{__version__} (+https://github.com/briis/pydmi)"
+
+# --- Licence --------------------------------------------------------------
+# DMI Open Data is CC BY 4.0: you MUST credit DMI wherever the data is shown.
+ATTRIBUTION: Final = "Data from DMI (Danmarks Meteorologiske Institut), CC BY 4.0"
+LICENSE_URL: Final = "https://www.dmi.dk/friedata/dokumentation/terms-of-use"
+
+# --- Condition thresholds (Home Assistant condition strings) --------------
+PRECIP_THRESHOLD_MM: Final = 0.1  # mm/h considered "precipitation"
+POURING_THRESHOLD_MM: Final = 4.0  # mm/h considered "pouring"
+# NB: DMI metadata says "0..1", but live values are in PERCENT (stable air gives
+# ~0.2-0.4, i.e. under half a percent). Verified 2026-11-09 against CAPE.
+LIGHTNING_THRESHOLD_PCT: Final = 30.0
+FOG_VISIBILITY_M: Final = 1000.0
+WINDY_THRESHOLD_MS: Final = 13.9  # Beaufort 7
+CLOUD_CLEAR_PCT: Final = 20.0
+CLOUD_PARTLY_PCT: Final = 70.0
+
+COND_CLEAR_NIGHT: Final = "clear-night"
+COND_CLOUDY: Final = "cloudy"
+COND_FOG: Final = "fog"
+COND_HAIL: Final = "hail"
+COND_LIGHTNING: Final = "lightning"
+COND_LIGHTNING_RAINY: Final = "lightning-rainy"
+COND_PARTLYCLOUDY: Final = "partlycloudy"
+COND_POURING: Final = "pouring"
+COND_RAINY: Final = "rainy"
+COND_SNOWY: Final = "snowy"
+COND_SNOWY_RAINY: Final = "snowy-rainy"
+COND_SUNNY: Final = "sunny"
+COND_WINDY: Final = "windy"
+COND_WINDY_VARIANT: Final = "windy-variant"
