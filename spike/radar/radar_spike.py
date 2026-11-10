@@ -317,8 +317,23 @@ def compass(deg: float) -> str:
     return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][round(deg / 45) % 8]
 
 
-def sensors(rate, where: dict, lat: float, lon: float, radius_km: float, rain_mmh: float) -> dict:
-    """Values a Home Assistant integration could expose, computed for one frame."""
+def local_rate(rate, col: float, row: float, half: int = 1) -> float:
+    """Mean rain rate over (2*half+1)^2 pixels around a point (3x3 = 1.5 x 1.5 km).
+    Smooths pixel jitter and catches drizzle the single pixel misses. NaN-safe."""
+    import numpy as np
+
+    c, r = round(col), round(row)
+    h, w = rate.shape
+    box = rate[max(0, r - half):min(h, r + half + 1), max(0, c - half):min(w, c + half + 1)]
+    if box.size == 0 or np.all(np.isnan(box)):
+        return float("nan")
+    return float(np.nanmean(box))
+
+
+def sensors(rate, where: dict, lat: float, lon: float, radius_km: float, rain_mmh: float,
+            clutter=None) -> dict:
+    """Values a Home Assistant integration could expose, computed for one frame.
+    `clutter` (bool grid, optional): pixels known to echo all the time - ignored."""
     import numpy as np
 
     col, row, px = to_pixels(where, lat, lon)
@@ -326,6 +341,8 @@ def sensors(rate, where: dict, lat: float, lon: float, radius_km: float, rain_mm
     h, w = rate.shape
     if not (0 <= c < w and 0 <= r < h):
         return {"error": "location outside radar grid"}
+    if clutter is not None:
+        rate = np.where(clutter, 0.0, rate)
     rad = int(radius_km * 1000 / px)
     r0, r1, c0, c1 = max(0, r - rad), min(h, r + rad + 1), max(0, c - rad), min(w, c + rad + 1)
     win = rate[r0:r1, c0:c1]
@@ -334,20 +351,26 @@ def sensors(rate, where: dict, lat: float, lon: float, radius_km: float, rain_mm
     inside = dist_km <= radius_km
     covered = inside & np.isfinite(win)
     rain = np.nan_to_num(win, nan=0.0) >= rain_mmh
-    # A rain pixel counts for "nearest rain" only with >= 3 rain pixels around it (drops speckle/clutter).
+    # A rain pixel counts only with >= 3 rain pixels around it (drops speckle, birds, ships, turbines).
     solid = rain & (_neighbour_count(rain) >= 3)
 
-    here = rate[r, c]
+    here = local_rate(rate, col, row)
+    pixel = rate[r, c]
     near = rate[max(0, r - 2):r + 3, max(0, c - 2):c + 3]  # 2.5 x 2.5 km
+    solid_vals = np.where(solid & covered, win, np.nan)
     out: dict = {
-        "rain_rate_mmh": None if np.isnan(here) else round(float(here), 2),
+        "rain_rate_mmh": None if math.isnan(here) else round(here, 2),
+        "rain_rate_pixel_mmh": None if np.isnan(pixel) else round(float(pixel), 2),
         "rain_rate_max_1km_mmh": None if np.all(np.isnan(near)) else round(float(np.nanmax(near)), 2),
         "radar_coverage_pct": round(100 * float(covered.sum() / max(1, inside.sum())), 1),
-        "rain_area_pct": round(100 * float((rain & covered).sum() / max(1, covered.sum())), 1),
-        "rain_max_mmh": round(float(np.nanmax(np.where(covered, win, np.nan))), 2) if covered.any() else None,
+        "rain_area_pct": round(100 * float((solid & covered).sum() / max(1, covered.sum())), 1),
+        "rain_max_mmh": round(float(np.nanmax(solid_vals)), 2) if np.isfinite(solid_vals).any() else 0.0,
         "radius_km": radius_km,
         "rain_threshold_mmh": rain_mmh,
     }
+    if not math.isnan(here) and here >= rain_mmh:
+        out.update(nearest_rain_km=0.0, nearest_rain_bearing_deg=None, nearest_rain_direction=None)
+        return out
     cand = solid & inside
     if cand.any():
         d = np.where(cand, dist_km, np.inf)
@@ -362,11 +385,17 @@ def sensors(rate, where: dict, lat: float, lon: float, radius_km: float, rain_mm
     return out
 
 
+MAX_SPEED_KMH = 150
+
+
 def motion(prev_rate, now_rate, minutes: float, where: dict, lat: float, lon: float,
-           rain_mmh: float, window_km: float = 150) -> dict:
-    """Movement of the rain field between two frames (FFT phase correlation over a
-    window around the location), plus a simple nowcast: follow the field backwards
-    from the location to see when rain would arrive."""
+           rain_mmh: float, window_km: float = 150, clutter=None) -> dict:
+    """Movement of the rain field between two frames, plus a simple nowcast.
+
+    Plain FFT cross-correlation of the (log) rain fields - big rain areas dominate,
+    unlike phase correlation, which weighs every speck equally and so locks onto
+    echoes that never move. Lags limited to MAX_SPEED_KMH. `quality` is the
+    correlation coefficient at the chosen shift (0..1)."""
     import numpy as np
 
     col, row, px = to_pixels(where, lat, lon)
@@ -377,40 +406,56 @@ def motion(prev_rate, now_rate, minutes: float, where: dict, lat: float, lon: fl
 
     def field(rate):
         f = np.nan_to_num(rate[r0:r1, c0:c1], nan=0.0)
-        return np.log1p(np.where(f >= rain_mmh, f, 0.0))
+        if clutter is not None:
+            f = np.where(clutter[r0:r1, c0:c1], 0.0, f)
+        f = np.where(f >= rain_mmh, f, 0.0)
+        f = np.where(_neighbour_count(f > 0) >= 3, f, 0.0)  # despeckle
+        return np.log1p(f)
 
     a, b = field(now_rate), field(prev_rate)
-    if a.max() == 0 or b.max() == 0:
-        return {"note": "no rain in the window - no motion to track"}
+    rain_px = int(min((a > 0).sum(), (b > 0).sum()))
+    if rain_px < 50:
+        return {"note": "too little rain in the window to track", "rain_pixels": rain_px}
     win = np.outer(np.hanning(a.shape[0]), np.hanning(a.shape[1]))
-    fa, fb = np.fft.fft2(a * win), np.fft.fft2(b * win)
-    cross = fa * np.conj(fb)
-    cross /= np.abs(cross) + 1e-9
-    corr = np.fft.ifft2(cross).real
-    peak = np.unravel_index(int(np.argmax(corr)), corr.shape)
-    dy_px, dx_px = (p if p <= s // 2 else p - s for p, s in zip(peak, corr.shape, strict=True))
-    # displacement prev -> now in pixels; convert to grid east/north, then to true direction
-    east, north = dx_px * px, -dy_px * px  # metres in `minutes`
+    a, b = (a - a.mean()) * win, (b - b.mean()) * win
+    # zero-pad to avoid wrap-around, then cross-correlate
+    shape = (a.shape[0] * 2, a.shape[1] * 2)
+    cc = np.fft.irfft2(np.fft.rfft2(a, shape) * np.conj(np.fft.rfft2(b, shape)), shape)
+    cc /= math.sqrt(float((a * a).sum() * (b * b).sum())) or 1.0
+    max_px = int(MAX_SPEED_KMH * minutes / 60 * 1000 / px) + 1
+    lags = np.r_[0:max_px + 1, -max_px:0]
+    sub = cc[np.ix_(lags % shape[0], lags % shape[1])]
+    i, j = np.unravel_index(int(np.argmax(sub)), sub.shape)
+    dy_px, dx_px = int(lags[i]), int(lags[j])
+    east, north = dx_px * px, -dy_px * px  # metres moved in `minutes`
     speed_kmh = math.hypot(east, north) / 1000 / (minutes / 60)
     rot = grid_north_deg(where, lat, lon)
     towards = (math.degrees(math.atan2(east, north)) - rot) % 360
     out = {
-        "shift_px": [int(dx_px), int(dy_px)],
+        "shift_px": [dx_px, dy_px],
         "speed_kmh": round(speed_kmh, 1),
         "moving_towards_deg": round(towards) if speed_kmh > 0 else None,
         "coming_from": compass((towards + 180) % 360) if speed_kmh > 0 else None,
-        "peak_strength": round(float(corr.max()), 3),
+        "peak_strength": round(float(sub[i, j]), 3),
+        "zero_shift_strength": round(float(cc[0, 0]), 3),
+        "rain_pixels": rain_px,
     }
-    # Nowcast: what is upstream of us now will be here in t minutes.
-    vx, vy = dx_px / minutes, dy_px / minutes  # pixels per minute (grid col/row)
+    # Nowcast: what is upstream of us now will be here in t minutes (same 1.5 km mean as "rain now").
+    vx, vy = dx_px / minutes, dy_px / minutes
+    field_now = np.nan_to_num(now_rate, nan=0.0)
+    if clutter is not None:
+        field_now = np.where(clutter, 0.0, field_now)
     eta = None
     for t in range(0, 121, 5):
-        pc, pr = round(col - vx * t), round(row - vy * t)
-        if not (2 <= pc < w - 2 and 2 <= pr < h - 2):
+        pc, pr = col - vx * t, row - vy * t
+        if not (1 <= pc < w - 1 and 1 <= pr < h - 1):
             break
-        if np.nanmax(np.nan_to_num(now_rate[pr - 2:pr + 3, pc - 2:pc + 3], nan=0.0)) >= rain_mmh:
+        v = local_rate(field_now, pc, pr)
+        if v >= rain_mmh:
             eta = t
             break
+        if speed_kmh == 0:
+            break  # nothing moves: only "now" can be answered
     out["rain_expected_in_min"] = eta
     out["nowcast_horizon_min"] = 120
     return out
@@ -473,11 +518,15 @@ def render(path: Path, lat: float, lon: float, radius_km: float) -> dict:
 # --- watch mode -----------------------------------------------------------------
 
 CSV_FIELDS = [
-    "scan_time_utc", "scan_time_local", "published_after_min", "rain_rate_mmh", "rain_rate_max_1km_mmh",
-    "precip", "radar_total_today_mm", "rain_area_pct", "rain_max_mmh", "nearest_rain_km",
-    "nearest_rain_direction", "motion_kmh", "coming_from", "motion_peak", "rain_expected_in_min",
-    "radar_coverage_pct",
+    "scan_time_utc", "scan_time_local", "published_after_min", "rain_rate_mmh", "rain_rate_pixel_mmh",
+    "rain_rate_max_1km_mmh", "precip", "radar_total_today_mm", "radar_total_pixel_today_mm",
+    "rain_area_pct", "rain_max_mmh", "nearest_rain_km", "nearest_rain_direction", "motion_kmh",
+    "coming_from", "motion_peak", "motion_zero_shift", "motion_shift_px", "rain_expected_in_min",
+    "clutter_pixels", "radar_coverage_pct",
 ]
+CLUTTER_ALPHA = 1 / 36      # echo frequency averaged over roughly the last 6 hours
+CLUTTER_FREQ = 0.8          # echo in >= 80 % of frames = treated as a fixed echo
+CLUTTER_MIN_FRAMES = 18     # only after 3 hours of history
 
 
 def _feature_time(feat: dict, key: str) -> datetime:
@@ -489,6 +538,13 @@ def watch(args) -> None:
     day, and append a row to radar_out/watch.csv. 1 listing + 1 download per frame."""
     tz = ZoneInfo(args.tz)
     csv_path = OUT / "watch.csv"
+    if csv_path.exists():
+        with csv_path.open(newline="") as old:
+            header = next(csv.reader(old), [])
+        if header != CSV_FIELDS:  # columns changed: keep the old log, start a new one
+            stamp = datetime.now(UTC).strftime("%Y%m%d%H%M")
+            csv_path.rename(OUT / f"watch_{stamp}.csv")
+            print(f"columns changed - old log kept as watch_{stamp}.csv", flush=True)
     new_file = not csv_path.exists()
     logged: set[str] = set()  # rows already in the CSV (restart-safe: recompute, don't duplicate)
     if not new_file:
@@ -501,12 +557,15 @@ def watch(args) -> None:
 
     seen: set[str] = set()
     prev: tuple[datetime, object] | None = None
-    total, total_day = 0.0, None
+    total, total_px, total_day = 0.0, 0.0, None
+    echo_freq = None  # running echo frequency per pixel -> fixed-echo (clutter) mask
+    n_frames = 0
     tmp = OUT / "watch_tmp.h5"
     end = datetime.now(UTC) + timedelta(hours=args.watch)
 
     def process(feat: dict) -> None:
-        nonlocal prev, total, total_day
+        nonlocal prev, total, total_px, total_day, echo_freq, n_frames
+        import numpy as np
         data, _ = get(feat["asset"]["data"]["href"], timeout=120)
         tmp.write_bytes(data)
         _, dbz, what, where, _ = decode(tmp)
@@ -514,22 +573,37 @@ def watch(args) -> None:
         how = describe(tmp)["groups"].get("how", {})
         rate = rain_rate(dbz, float(how.get("zr-a", 200.0)), float(how.get("zr-b", 1.6)))
         del dbz
-        se = sensors(rate, where, args.lat, args.lon, args.sensor_radius_km, args.rain_mmh)
+        echo = (np.nan_to_num(rate, nan=0.0) >= args.drizzle_mmh).astype(np.float32)
+        if echo_freq is None or echo_freq.shape != echo.shape:
+            echo_freq, n_frames = echo, 0
+        else:
+            echo_freq = echo_freq * (1 - CLUTTER_ALPHA) + echo * CLUTTER_ALPHA
+        n_frames += 1
+        clutter = echo_freq >= CLUTTER_FREQ if n_frames >= CLUTTER_MIN_FRAMES else None
+        se = sensors(rate, where, args.lat, args.lon, args.sensor_radius_km, args.rain_mmh, clutter)
         here = se.get("rain_rate_mmh") or 0.0
+        here_px = se.get("rain_rate_pixel_mmh") or 0.0
+        clutter_px = 0
+        if clutter is not None:
+            col, row, px = to_pixels(where, args.lat, args.lon)
+            rad = int(args.sensor_radius_km * 1000 / px)
+            c, r = round(col), round(row)
+            clutter_px = int(clutter[max(0, r - rad):r + rad + 1, max(0, c - rad):c + rad + 1].sum())
 
         local = t.astimezone(tz)
         if total_day != local.date():
-            total, total_day = 0.0, local.date()
+            total, total_px, total_day = 0.0, 0.0, local.date()
         # the rate at scan time stands for the interval up to the next scan
         minutes = 10.0
         if prev is not None:
             minutes = min(20.0, max(1.0, (t - prev[0]).total_seconds() / 60))
         total += here * minutes / 60
+        total_px += here_px * minutes / 60
 
         mo: dict = {}
         if prev is not None and (t - prev[0]) <= timedelta(minutes=20):
             mo = motion(prev[1], rate, (t - prev[0]).total_seconds() / 60, where,
-                        args.lat, args.lon, args.rain_mmh)
+                        args.lat, args.lon, args.rain_mmh, clutter=clutter)
         prev = (t, rate)
 
         precip = "rain" if here >= args.rain_mmh else "drizzle" if here >= args.drizzle_mmh else "none"
@@ -538,9 +612,11 @@ def watch(args) -> None:
             "scan_time_local": local.strftime("%Y-%m-%d %H:%M"),
             "published_after_min": round((_feature_time(feat, "created") - t).total_seconds() / 60, 1),
             "rain_rate_mmh": se.get("rain_rate_mmh"),
+            "rain_rate_pixel_mmh": se.get("rain_rate_pixel_mmh"),
             "rain_rate_max_1km_mmh": se.get("rain_rate_max_1km_mmh"),
             "precip": precip,
             "radar_total_today_mm": round(total, 2),
+            "radar_total_pixel_today_mm": round(total_px, 2),
             "rain_area_pct": se.get("rain_area_pct"),
             "rain_max_mmh": se.get("rain_max_mmh"),
             "nearest_rain_km": se.get("nearest_rain_km"),
@@ -548,7 +624,10 @@ def watch(args) -> None:
             "motion_kmh": mo.get("speed_kmh"),
             "coming_from": mo.get("coming_from"),
             "motion_peak": mo.get("peak_strength"),
+            "motion_zero_shift": mo.get("zero_shift_strength"),
+            "motion_shift_px": " ".join(map(str, mo["shift_px"])) if "shift_px" in mo else None,
             "rain_expected_in_min": mo.get("rain_expected_in_min"),
+            "clutter_pixels": clutter_px,
             "radar_coverage_pct": se.get("radar_coverage_pct"),
         }
         if row["scan_time_utc"] in logged:
@@ -721,7 +800,9 @@ def main() -> None:
           f"(max within ~1 km {se.get('rain_rate_max_1km_mmh')}), "
           f"rain on {se.get('rain_area_pct')}% within {se.get('radius_km')} km (max {se.get('rain_max_mmh')} mm/h), "
           f"coverage {se.get('radar_coverage_pct')}%")
-    if se.get("nearest_rain_km") is not None:
+    if se.get("nearest_rain_km") == 0:
+        print("           raining at the location")
+    elif se.get("nearest_rain_km") is not None:
         print(f"           nearest rain {se['nearest_rain_km']} km to the {se['nearest_rain_direction']} "
               f"({se['nearest_rain_bearing_deg']} deg)")
     else:
@@ -730,7 +811,7 @@ def main() -> None:
     if mo:
         if "speed_kmh" in mo:
             print(f"motion     {mo['speed_kmh']} km/h from {mo['coming_from']}  shift {mo['shift_px']} px "
-                  f"in {mo['minutes']:.0f} min  (peak {mo['peak_strength']})")
+                  f"in {mo['minutes']:.0f} min  (peak {mo['peak_strength']}, zero shift {mo['zero_shift_strength']})")
             eta = mo["rain_expected_in_min"]
             print(f"nowcast    {'raining now' if eta == 0 else f'rain in ~{eta} min' if eta else 'no rain expected within 2 h'}")
         else:

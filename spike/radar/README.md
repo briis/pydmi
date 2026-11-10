@@ -69,6 +69,24 @@ caffeinate -i python spike/radar/radar_spike.py --watch 24 --since-midnight
 - First observation (10 Nov, 06:45): radar 0.11 mm/h within 1 km while the station reported
   near-invisible drizzle. Radar sees drizzle only weakly (small drops; beam 1–2 km up).
 
+### First night vs the rain gauge (10 Nov, 00:00–07:05 local)
+
+- **Timing matches the gauge to within one frame**: every 0.2 mm tip (02:09, 03:26, 04:06–05:08 UTC)
+  falls in a radar rain period; the heaviest radar rain (1.54 mm/h at 04:55) matches the fastest tips
+  (0.6 mm in 22 min). No tips after 05:08, radar only drizzle.
+- **Amount too low**: radar 0.94 mm vs gauge 1.6 mm (about -40 %). The single pixel missed the first
+  0.2 mm entirely (0.0 at the pixel, 0.12–0.17 within 1 km). Typical for drizzle / light rain with
+  Marshall-Palmer and a beam 1–2 km up. → now uses the mean over 3×3 pixels (1.5 km); pixel kept
+  as a separate column to compare. A correction factor may be needed (decide after more days).
+- **Motion was broken**: 30 of 42 frames gave 0 km/h, peak 0.03–0.07. Phase correlation weighs
+  every speck equally and locked onto echoes that never move. Reproduced with synthetic data
+  (fixed echoes + moving rain: always 0 km/h). → replaced by plain cross-correlation (big rain
+  areas dominate, quality 0..1) plus a **fixed-echo mask** learned in watch mode (pixels with echo
+  in ≥ 80 % of frames over ~6 h, after 3 h of history). Synthetic test: correct motion at 2–47 %
+  rain area; stationary rain stays at 0.
+- Fixes: "rain now", `precip` and ETA 0 use the same 1.5 km mean; nearest rain = 0 km (no direction)
+  while it rains at the location; `rain_max` only from despeckled rain (one 236 mm/h false echo seen).
+
 ## Run it
 
 ```bash
