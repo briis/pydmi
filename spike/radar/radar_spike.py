@@ -490,6 +490,10 @@ def watch(args) -> None:
     tz = ZoneInfo(args.tz)
     csv_path = OUT / "watch.csv"
     new_file = not csv_path.exists()
+    logged: set[str] = set()  # rows already in the CSV (restart-safe: recompute, don't duplicate)
+    if not new_file:
+        with csv_path.open(newline="") as old:
+            logged = {row["scan_time_utc"] for row in csv.DictReader(old)}
     fh = csv_path.open("a", newline="")
     writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
     if new_file:
@@ -547,6 +551,8 @@ def watch(args) -> None:
             "rain_expected_in_min": mo.get("rain_expected_in_min"),
             "radar_coverage_pct": se.get("radar_coverage_pct"),
         }
+        if row["scan_time_utc"] in logged:
+            return
         writer.writerow(row)
         fh.flush()
         eta = row["rain_expected_in_min"]
@@ -570,12 +576,17 @@ def watch(args) -> None:
 
         print(f"watching {args.scan} until {end.astimezone(tz):%H:%M} - Ctrl-C to stop; log: {csv_path}", flush=True)
         while datetime.now(UTC) < end:
-            feats = list_items(args.scan, 2)
-            new = [f for f in reversed(feats) if f["id"] not in seen]
-            for feat in new:
-                process(feat)
-                seen.add(feat["id"])
-                time.sleep(2)
+            try:
+                feats = list_items(args.scan, 2)
+                new = [f for f in reversed(feats) if f["id"] not in seen]
+                for feat in new:
+                    process(feat)
+                    seen.add(feat["id"])
+                    time.sleep(2)
+            except Exception as err:  # noqa: BLE001 - network hiccup / 429: wait and retry
+                print(f"{datetime.now(tz):%H:%M} error: {err!r} - retrying in 2 min", flush=True)
+                time.sleep(120)
+                continue
             # next frame expected 10 min after the newest, published ~7-12 min later
             newest = _feature_time(feats[0], "created") if feats else datetime.now(UTC)
             wake = newest + timedelta(minutes=10, seconds=20)
