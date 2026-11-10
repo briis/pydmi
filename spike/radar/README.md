@@ -53,6 +53,22 @@ Computed for the location from the newest frame (and the frame before it):
 - Limits: constant-velocity extrapolation (no growth/decay); showers developing in place are
   not predicted. Static clutter would show as zero motion.
 
+## Watch mode: compare with a rain gauge
+
+```bash
+caffeinate -i python spike/radar/radar_spike.py --watch 24 --since-midnight
+```
+
+- Backfills every doppler frame since local midnight (about 6 per hour, 2 s apart), then logs each
+  new frame for 24 h to `radar_out/watch.csv` (also printed). `caffeinate -i` keeps the Mac awake.
+- Columns: scan time (UTC/local), publish delay, rain rate at the location and max within ~1 km,
+  `precip` (`none` / `drizzle` ≥ 0.1 / `rain` ≥ 0.2 mm/h), **`radar_total_today_mm`** (rate × 10 min,
+  summed, reset at local midnight - compare with the station's daily rain), rain area / max / nearest
+  rain within 50 km, motion speed / direction / correlation peak, rain ETA, coverage.
+- DMI load: 1 listing + 1 download (0.12 MB) per 10 minutes. Downloaded files are not kept.
+- First observation (10 Nov, 06:45): radar 0.11 mm/h within 1 km while the station reported
+  near-invisible drizzle. Radar sees drizzle only weakly (small drops; beam 1–2 km up).
+
 ## Run it
 
 ```bash

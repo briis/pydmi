@@ -27,7 +27,8 @@ Requests: 3 listings + 1 download per --frames (default 2). Be kind to DMI.
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime
+import csv
+from datetime import UTC, datetime, timedelta
 import json
 import math
 from pathlib import Path
@@ -35,6 +36,7 @@ import resource
 import sys
 import time
 import urllib.request
+from zoneinfo import ZoneInfo
 
 BASE = "https://opendataapi.dmi.dk/v1/radardata"
 UA = "pydmi-radar-spike (+https://github.com/briis/pydmi)"
@@ -468,6 +470,125 @@ def render(path: Path, lat: float, lon: float, radius_km: float) -> dict:
     return result
 
 
+# --- watch mode -----------------------------------------------------------------
+
+CSV_FIELDS = [
+    "scan_time_utc", "scan_time_local", "published_after_min", "rain_rate_mmh", "rain_rate_max_1km_mmh",
+    "precip", "radar_total_today_mm", "rain_area_pct", "rain_max_mmh", "nearest_rain_km",
+    "nearest_rain_direction", "motion_kmh", "coming_from", "motion_peak", "rain_expected_in_min",
+    "radar_coverage_pct",
+]
+
+
+def _feature_time(feat: dict, key: str) -> datetime:
+    return datetime.fromisoformat(feat["properties"][key].replace("Z", "+00:00"))
+
+
+def watch(args) -> None:
+    """Every new frame: compute the sensors, keep a running radar total for the local
+    day, and append a row to radar_out/watch.csv. 1 listing + 1 download per frame."""
+    tz = ZoneInfo(args.tz)
+    csv_path = OUT / "watch.csv"
+    new_file = not csv_path.exists()
+    fh = csv_path.open("a", newline="")
+    writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+    if new_file:
+        writer.writeheader()
+
+    seen: set[str] = set()
+    prev: tuple[datetime, object] | None = None
+    total, total_day = 0.0, None
+    tmp = OUT / "watch_tmp.h5"
+    end = datetime.now(UTC) + timedelta(hours=args.watch)
+
+    def process(feat: dict) -> None:
+        nonlocal prev, total, total_day
+        data, _ = get(feat["asset"]["data"]["href"], timeout=120)
+        tmp.write_bytes(data)
+        _, dbz, what, where, _ = decode(tmp)
+        t = scan_time(what) or _feature_time(feat, "datetime")
+        how = describe(tmp)["groups"].get("how", {})
+        rate = rain_rate(dbz, float(how.get("zr-a", 200.0)), float(how.get("zr-b", 1.6)))
+        del dbz
+        se = sensors(rate, where, args.lat, args.lon, args.sensor_radius_km, args.rain_mmh)
+        here = se.get("rain_rate_mmh") or 0.0
+
+        local = t.astimezone(tz)
+        if total_day != local.date():
+            total, total_day = 0.0, local.date()
+        # the rate at scan time stands for the interval up to the next scan
+        minutes = 10.0
+        if prev is not None:
+            minutes = min(20.0, max(1.0, (t - prev[0]).total_seconds() / 60))
+        total += here * minutes / 60
+
+        mo: dict = {}
+        if prev is not None and (t - prev[0]) <= timedelta(minutes=20):
+            mo = motion(prev[1], rate, (t - prev[0]).total_seconds() / 60, where,
+                        args.lat, args.lon, args.rain_mmh)
+        prev = (t, rate)
+
+        precip = "rain" if here >= args.rain_mmh else "drizzle" if here >= args.drizzle_mmh else "none"
+        row = {
+            "scan_time_utc": t.isoformat(timespec="minutes"),
+            "scan_time_local": local.strftime("%Y-%m-%d %H:%M"),
+            "published_after_min": round((_feature_time(feat, "created") - t).total_seconds() / 60, 1),
+            "rain_rate_mmh": se.get("rain_rate_mmh"),
+            "rain_rate_max_1km_mmh": se.get("rain_rate_max_1km_mmh"),
+            "precip": precip,
+            "radar_total_today_mm": round(total, 2),
+            "rain_area_pct": se.get("rain_area_pct"),
+            "rain_max_mmh": se.get("rain_max_mmh"),
+            "nearest_rain_km": se.get("nearest_rain_km"),
+            "nearest_rain_direction": se.get("nearest_rain_direction"),
+            "motion_kmh": mo.get("speed_kmh"),
+            "coming_from": mo.get("coming_from"),
+            "motion_peak": mo.get("peak_strength"),
+            "rain_expected_in_min": mo.get("rain_expected_in_min"),
+            "radar_coverage_pct": se.get("radar_coverage_pct"),
+        }
+        writer.writerow(row)
+        fh.flush()
+        eta = row["rain_expected_in_min"]
+        print(f"{row['scan_time_local']}  {precip:7} here {row['rain_rate_mmh']} mm/h  "
+              f"total {row['radar_total_today_mm']} mm  area {row['rain_area_pct']}%  "
+              f"nearest {row['nearest_rain_km']} km {row['nearest_rain_direction'] or ''}  "
+              f"motion {row['motion_kmh']} km/h {row['coming_from'] or ''} (peak {row['motion_peak']})  "
+              f"eta {eta if eta is not None else '-'}", flush=True)
+
+    try:
+        if args.since_midnight:
+            midnight = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+            needed = int((datetime.now(UTC) - midnight).total_seconds() // 600) + 2
+            feats = [f for f in list_items(args.scan, min(needed, 200))
+                     if _feature_time(f, "datetime") >= midnight]
+            print(f"backfilling {len(feats)} frames since local midnight (2 s between downloads) ...", flush=True)
+            for feat in reversed(feats):  # oldest first
+                process(feat)
+                seen.add(feat["id"])
+                time.sleep(2)
+
+        print(f"watching {args.scan} until {end.astimezone(tz):%H:%M} - Ctrl-C to stop; log: {csv_path}", flush=True)
+        while datetime.now(UTC) < end:
+            feats = list_items(args.scan, 2)
+            new = [f for f in reversed(feats) if f["id"] not in seen]
+            for feat in new:
+                process(feat)
+                seen.add(feat["id"])
+                time.sleep(2)
+            # next frame expected 10 min after the newest, published ~7-12 min later
+            newest = _feature_time(feats[0], "created") if feats else datetime.now(UTC)
+            wake = newest + timedelta(minutes=10, seconds=20)
+            pause = (wake - datetime.now(UTC)).total_seconds()
+            time.sleep(pause if pause > 0 else 60)  # late: poll once a minute
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        fh.close()
+        tmp.unlink(missing_ok=True)
+        print(f"log: {csv_path}")
+
+
 # --- main -----------------------------------------------------------------------
 
 
@@ -476,7 +597,7 @@ def main() -> None:
     ap.add_argument("--lat", type=float, default=55.7357)
     ap.add_argument("--lon", type=float, default=12.1516)
     ap.add_argument("--radius-km", type=float, default=100)
-    ap.add_argument("--scan", choices=["fullRange", "doppler"], default="fullRange")
+    ap.add_argument("--scan", choices=["fullRange", "doppler"], default="doppler")
     ap.add_argument("--frames", type=int, default=2,
                     help="download this many newest files (2 = enough for motion/ETA; 6 = cost of a 1-hour loop)")
     ap.add_argument("--file", type=Path, nargs="+", help="use existing .h5 file(s) instead of downloading")
@@ -486,10 +607,19 @@ def main() -> None:
                     help="HDF5 reader (auto = h5py if installed, else pyfive)")
     ap.add_argument("--compare-readers", action="store_true",
                     help="decode the file with both h5py and pyfive and compare time")
+    ap.add_argument("--drizzle-mmh", type=float, default=0.1, help="drizzle threshold in mm/h (watch mode)")
+    ap.add_argument("--watch", type=float, metavar="HOURS",
+                    help="log every new frame to radar_out/watch.csv for this many hours")
+    ap.add_argument("--since-midnight", action="store_true",
+                    help="with --watch: first backfill all frames since local midnight (radar total for today)")
+    ap.add_argument("--tz", default="Europe/Copenhagen", help="time zone for 'today' (watch mode)")
     args = ap.parse_args()
     global READER
     READER = args.reader
     OUT.mkdir(exist_ok=True)
+    if args.watch:
+        watch(args)
+        return
     report: dict = {"run_at": datetime.now(UTC).isoformat(), "args": {k: str(v) for k, v in vars(args).items()}}
 
     files: list[Path] = []
