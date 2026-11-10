@@ -8,9 +8,13 @@ Not part of the package. Answers, with real data:
   4. How long it takes, and how much memory, to turn one into a PNG cropped
      around a location.
 
-Usage (needs: pip install h5py numpy pillow pyproj):
+Usage (needs: pip install numpy pillow pyproj, plus h5py and/or pyfive):
     python spike/radar/radar_spike.py --lat 55.7357 --lon 12.1516
     python spike/radar/radar_spike.py --file some.h5           # offline, existing file
+    python spike/radar/radar_spike.py --reader pyfive          # pure-Python HDF5 reader
+
+HDF5 readers: h5py (compiled, needs the HDF5 C library) or pyfive (pure Python,
+no compiled code - would avoid binary dependencies in Home Assistant).
 
 Writes radar_out/: the downloaded .h5, a cropped PNG and report.json.
 Requests: 2 listings + 1 download (+1 per --frames). Be kind to DMI.
@@ -80,40 +84,82 @@ def _attrs(obj) -> dict:
     return out
 
 
+READER = "auto"
+
+
+def _open(path: Path):
+    """Open with h5py or pyfive (READER = auto/h5py/pyfive)."""
+    if READER in ("auto", "h5py"):
+        try:
+            import h5py
+
+            return h5py.File(path, "r"), "h5py"
+        except ImportError:
+            if READER == "h5py":
+                raise
+    import pyfive
+
+    return pyfive.File(str(path)), "pyfive"
+
+
+def _is_dataset(obj) -> bool:
+    return hasattr(obj, "shape") and not hasattr(obj, "keys")
+
+
 def describe(path: Path) -> dict:
-    import h5py
-
     info: dict = {"groups": {}}
-    with h5py.File(path, "r") as f:
+    f, reader = _open(path)
+    info["reader"] = reader
 
-        def visit(name, obj):
-            if isinstance(obj, h5py.Dataset):
+    def walk(group, prefix: str) -> None:
+        for key in group.keys():
+            obj = group[key]
+            name = f"{prefix}{key}"
+            if _is_dataset(obj):
                 info["groups"][name] = {"dataset": True, "shape": list(obj.shape), "dtype": str(obj.dtype)}
-            elif obj.attrs:
-                info["groups"][name] = _attrs(obj)
+            else:
+                if obj.attrs:
+                    info["groups"][name] = _attrs(obj)
+                walk(obj, f"{name}/")
 
+    try:
         info["root"] = _attrs(f)
-        f.visititems(visit)
+        walk(f, "")
+    finally:
+        if hasattr(f, "close"):
+            f.close()
     return info
 
 
 def find_data(path: Path):
     """First dataset*/data*/data array with its ODIM scaling and the root 'where'."""
-    import h5py
     import numpy as np
 
-    with h5py.File(path, "r") as f:
-        where = _attrs(f["where"]) if "where" in f else {}
-        for ds in sorted(k for k in f if k.startswith("dataset")):
-            for dk in sorted(k for k in f[ds] if k.startswith("data")):
+    f, _ = _open(path)
+    with _closing(f):
+        where = _attrs(f["where"]) if "where" in f.keys() else {}
+        for ds in sorted(k for k in f.keys() if k.startswith("dataset")):
+            for dk in sorted(k for k in f[ds].keys() if k.startswith("data")):
                 node = f[ds][dk]
-                if "data" not in node:
+                if "data" not in node.keys():
                     continue
-                what = {**(_attrs(f[ds]["what"]) if "what" in f[ds] else {}),
-                        **(_attrs(node["what"]) if "what" in node else {})}
+                what = {**(_attrs(f[ds]["what"]) if "what" in f[ds].keys() else {}),
+                        **(_attrs(node["what"]) if "what" in node.keys() else {})}
                 arr = np.asarray(node["data"][()])
                 return arr, what, where, f"{ds}/{dk}"
     raise SystemExit("No dataset*/data*/data found - see the structure in report.json")
+
+
+class _closing:
+    def __init__(self, f) -> None:
+        self.f = f
+
+    def __enter__(self):
+        return self.f
+
+    def __exit__(self, *exc) -> None:
+        if hasattr(self.f, "close"):
+            self.f.close()
 
 
 # --- rendering ----------------------------------------------------------------
@@ -222,7 +268,13 @@ def main() -> None:
     ap.add_argument("--scan", choices=["fullRange", "doppler"], default="fullRange")
     ap.add_argument("--frames", type=int, default=1, help="download this many newest files (animation cost)")
     ap.add_argument("--file", type=Path, help="use an existing .h5 instead of downloading")
+    ap.add_argument("--reader", choices=["auto", "h5py", "pyfive"], default="auto",
+                    help="HDF5 reader (auto = h5py if installed, else pyfive)")
+    ap.add_argument("--compare-readers", action="store_true",
+                    help="decode the file with both h5py and pyfive and compare time")
     args = ap.parse_args()
+    global READER
+    READER = args.reader
     OUT.mkdir(exist_ok=True)
     report: dict = {"run_at": datetime.now(UTC).isoformat(), "args": {k: str(v) for k, v in vars(args).items()}}
 
@@ -252,6 +304,17 @@ def main() -> None:
 
     report["structure"] = describe(files[0])
     report["render"] = render(files[0], args.lat, args.lon, args.radius_km)
+    report["render"]["reader"] = report["structure"]["reader"]
+    if args.compare_readers:
+        report["reader_compare"] = {}
+        for name in ("h5py", "pyfive"):
+            READER = name
+            try:
+                t0 = time.perf_counter()
+                find_data(files[0])
+                report["reader_compare"][name] = {"read_s": round(time.perf_counter() - t0, 3)}
+            except Exception as err:  # noqa: BLE001
+                report["reader_compare"][name] = {"error": repr(err)}
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     report["peak_memory_mb"] = round(rss / (1_048_576 if sys.platform == "darwin" else 1024), 1)
 
@@ -267,7 +330,9 @@ def main() -> None:
     r = report["render"]
     print(f"data       {r['node']}  quantity={r['quantity']}  grid={r['grid']} {r['dtype']}  "
           f"pixel={r.get('pixel_size_m')} m  max={r['dbz_max']} dBZ  echo={r['pixels_with_echo_pct']}%")
-    print(f"render     decode {r['decode_s']} s + png {r['render_s']} s -> {r['png']} "
+    for name, res in (report.get("reader_compare") or {}).items():
+        print(f"reader     {name}: {res}")
+    print(f"render     [{r['reader']}] decode {r['decode_s']} s + png {r['render_s']} s -> {r['png']} "
           f"({r['png_kb']} kB, {r['crop_px'][0]}x{r['crop_px'][1]} px)")
     print(f"memory     peak {report['peak_memory_mb']} MB")
     print(f"full report: {OUT / 'report.json'}")
