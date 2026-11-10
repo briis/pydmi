@@ -87,6 +87,21 @@ caffeinate -i python spike/radar/radar_spike.py --watch 24 --since-midnight
 - Fixes: "rain now", `precip` and ETA 0 use the same 1.5 km mean; nearest rain = 0 km (no direction)
   while it rains at the location; `rain_max` only from despeckled rain (one 236 mm/h false echo seen).
 
+### Second pass over the same night (new methods)
+
+- **Motion works**: 6–17 km/h from NW/N in almost every frame, steady from frame to frame
+  (correlation 0.58–0.83). Before: 0 km/h in 30 of 42 frames.
+- **ETA counts down correctly**: at 00:25 UTC "rain in 90 min", then 85, 80, 65, 40, 15, 5, 0 -
+  rain arrived at 01:55 UTC, exactly as predicted 90 min earlier (gauge tip 02:09). Also 03:55 → "20 min",
+  rain 04:15 ✓.
+- **Amount still low**: 1.5 km mean 0.91 mm vs single pixel 0.87 mm vs gauge 1.6 mm at 05:08 UTC.
+  The mean barely helps, so the gap is a bias in the radar estimate, not position. The first gauge tip
+  (00:24, radar dry) may hold rain from before midnight; excluding it, radar ≈ 65 % of the gauge.
+  Needs several events before choosing a correction factor.
+- **Bug found and fixed**: the fixed-echo mask started from the first frame, so rain at 00:05 counted
+  as "fixed" (2101 px, slowly decaying to 290). Now a plain share over the last 36 frames (cropped to
+  150 km around the location); synthetic test: exactly the 16 fixed pixels, moving rain never masked.
+
 ## Run it
 
 ```bash

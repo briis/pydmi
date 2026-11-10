@@ -524,9 +524,10 @@ CSV_FIELDS = [
     "coming_from", "motion_peak", "motion_zero_shift", "motion_shift_px", "rain_expected_in_min",
     "clutter_pixels", "radar_coverage_pct",
 ]
-CLUTTER_ALPHA = 1 / 36      # echo frequency averaged over roughly the last 6 hours
-CLUTTER_FREQ = 0.8          # echo in >= 80 % of frames = treated as a fixed echo
+CLUTTER_FRAMES = 36         # history: the last 36 frames (6 hours)
+CLUTTER_FREQ = 0.8          # echo in >= 80 % of them = treated as a fixed echo
 CLUTTER_MIN_FRAMES = 18     # only after 3 hours of history
+CLUTTER_WINDOW_KM = 150     # kept only around the location (motion window)
 
 
 def _feature_time(feat: dict, key: str) -> datetime:
@@ -558,13 +559,14 @@ def watch(args) -> None:
     seen: set[str] = set()
     prev: tuple[datetime, object] | None = None
     total, total_px, total_day = 0.0, 0.0, None
-    echo_freq = None  # running echo frequency per pixel -> fixed-echo (clutter) mask
-    n_frames = 0
+    from collections import deque
+
+    history: deque = deque(maxlen=CLUTTER_FRAMES)  # echo masks (cropped) of the last frames
     tmp = OUT / "watch_tmp.h5"
     end = datetime.now(UTC) + timedelta(hours=args.watch)
 
     def process(feat: dict) -> None:
-        nonlocal prev, total, total_px, total_day, echo_freq, n_frames
+        nonlocal prev, total, total_px, total_day
         import numpy as np
         data, _ = get(feat["asset"]["data"]["href"], timeout=120)
         tmp.write_bytes(data)
@@ -573,13 +575,19 @@ def watch(args) -> None:
         how = describe(tmp)["groups"].get("how", {})
         rate = rain_rate(dbz, float(how.get("zr-a", 200.0)), float(how.get("zr-b", 1.6)))
         del dbz
-        echo = (np.nan_to_num(rate, nan=0.0) >= args.drizzle_mmh).astype(np.float32)
-        if echo_freq is None or echo_freq.shape != echo.shape:
-            echo_freq, n_frames = echo, 0
-        else:
-            echo_freq = echo_freq * (1 - CLUTTER_ALPHA) + echo * CLUTTER_ALPHA
-        n_frames += 1
-        clutter = echo_freq >= CLUTTER_FREQ if n_frames >= CLUTTER_MIN_FRAMES else None
+        # fixed echoes: pixels with echo in >= 80 % of the last (up to) 36 frames
+        col0, row0, px0 = to_pixels(where, args.lat, args.lon)
+        hw = int(CLUTTER_WINDOW_KM * 1000 / px0)
+        r0, c0 = max(0, round(row0) - hw), max(0, round(col0) - hw)
+        r1, c1 = min(rate.shape[0], round(row0) + hw), min(rate.shape[1], round(col0) + hw)
+        crop = np.nan_to_num(rate[r0:r1, c0:c1], nan=0.0) >= args.drizzle_mmh
+        if history and history[-1].shape != crop.shape:
+            history.clear()
+        history.append(crop)
+        clutter = None
+        if len(history) >= CLUTTER_MIN_FRAMES:
+            clutter = np.zeros(rate.shape, dtype=bool)
+            clutter[r0:r1, c0:c1] = np.mean(np.stack(history), axis=0) >= CLUTTER_FREQ
         se = sensors(rate, where, args.lat, args.lon, args.sensor_radius_km, args.rain_mmh, clutter)
         here = se.get("rain_rate_mmh") or 0.0
         here_px = se.get("rain_rate_pixel_mmh") or 0.0
