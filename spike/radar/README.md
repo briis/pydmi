@@ -26,15 +26,42 @@ whether radar is worth adding to pydmi and ha-dmi-weather before touching the re
 - pyfive returns scalar attributes as 1-element arrays; the script unwraps them.
 - pyfive (pure Python) reads the real file fine.
 
+### Second run (doppler)
+
+- `doppler` is published after ~7 min vs ~12 min for `fullRange`: about 5 minutes fresher.
+- The 100 km crop around Gundsømagle is fully covered (no range edge), same file size (0.12 MB)
+  and speed. Doppler is the better default; `fullRange` only matters near the edge of coverage.
+
+## Nowcast sensors (option B)
+
+Computed for the location from the newest frame (and the frame before it):
+
+| Value | How |
+|---|---|
+| `rain_rate_mmh` | dBZ → Z = 10^(dBZ/10) → R = (Z/a)^(1/b), with a=200, b=1.6 from the file's `how` |
+| `rain_rate_max_1km_mmh` | max over 2.5 × 2.5 km around the location |
+| `rain_area_pct`, `rain_max_mmh` | share / max of rain ≥ threshold (default 0.2 mm/h) within the radius (default 50 km) |
+| `nearest_rain_km` + direction | nearest rain pixel with ≥ 3 rain neighbours (drops speckle), bearing corrected to true north |
+| `radar_coverage_pct` | share of the radius that has radar data (nodata = no coverage) |
+| motion `speed_kmh`, `coming_from` | FFT phase correlation of the two newest frames in a 300 × 300 km window |
+| `rain_expected_in_min` | follow the motion back from the location, 5-min steps, up to 2 h (0 = raining now) |
+
+- The stereographic projection is done in plain Python (Snyder's oblique ellipsoidal formulas);
+  identical to pyproj on DMI's grid, so **pyproj is not needed**.
+- Checked on synthetic data: a blob 30 km west moving east at 60 km/h gives 60 km/h from W and
+  rain in ~25 min; a blob passing by gives no ETA.
+- Limits: constant-velocity extrapolation (no growth/decay); showers developing in place are
+  not predicted. Static clutter would show as zero motion.
+
 ## Run it
 
 ```bash
-pip install numpy pillow pyproj pyfive        # pure-Python HDF5 reader
-pip install h5py                              # optional: compiled reader, to compare
-python spike/radar/radar_spike.py --lat 55.7357 --lon 12.1516           # newest file
+pip install numpy pillow pyfive               # pure-Python HDF5 reader
+pip install h5py pyproj                       # optional: compiled reader / projection cross-check
+python spike/radar/radar_spike.py --scan doppler                        # 2 newest frames + nowcast
 python spike/radar/radar_spike.py --reader pyfive --compare-readers   # both readers, if h5py is installed
 python spike/radar/radar_spike.py --frames 6                            # cost of a 1-hour loop
-python spike/radar/radar_spike.py --file radar_out/<file>.h5 --radius-km 50   # offline re-render
+python spike/radar/radar_spike.py --file radar_out/<new>.h5 radar_out/<old>.h5   # offline, with motion
 ```
 
 Output in `radar_out/`: the `.h5` file, a PNG cropped around the location (with a marker) and

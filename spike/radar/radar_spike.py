@@ -7,17 +7,21 @@ Not part of the package. Answers, with real data:
   3. What is inside (ODIM HDF5 structure, projection, grid, quantity, scaling).
   4. How long it takes, and how much memory, to turn one into a PNG cropped
      around a location.
+  5. Nowcast "sensors" for the location: radar rain rate (mm/h), rain area and
+     nearest rain within a radius, and - from the two newest frames - how the
+     rain moves and when it would reach the location.
 
-Usage (needs: pip install numpy pillow pyproj, plus h5py and/or pyfive):
-    python spike/radar/radar_spike.py --lat 55.7357 --lon 12.1516
-    python spike/radar/radar_spike.py --file some.h5           # offline, existing file
+Usage (needs: pip install numpy pillow, plus pyfive and/or h5py; pyproj optional,
+only used to cross-check the built-in projection):
+    python spike/radar/radar_spike.py --scan doppler           # 2 newest frames
+    python spike/radar/radar_spike.py --file a.h5 b.h5         # offline, existing files
     python spike/radar/radar_spike.py --reader pyfive          # pure-Python HDF5 reader
 
 HDF5 readers: h5py (compiled, needs the HDF5 C library) or pyfive (pure Python,
 no compiled code - would avoid binary dependencies in Home Assistant).
 
 Writes radar_out/: the downloaded .h5, a cropped PNG and report.json.
-Requests: 2 listings + 1 download (+1 per --frames). Be kind to DMI.
+Requests: 3 listings + 1 download per --frames (default 2). Be kind to DMI.
 """
 
 from __future__ import annotations
@@ -200,14 +204,214 @@ def colourise(dbz):
     return rgba
 
 
+def _projdef(projdef: str) -> dict:
+    out = {}
+    for part in projdef.split():
+        if part.startswith("+") and "=" in part:
+            k, v = part[1:].split("=", 1)
+            out[k] = v
+    return out
+
+
+def stere_xy(projdef: str, lat: float, lon: float) -> tuple[float, float]:
+    """Oblique stereographic on the WGS84 ellipsoid (what PROJ's +proj=stere does
+    when lat_0 is not a pole; Snyder 1987, eq. 21-27). Plain Python, no pyproj."""
+    p = _projdef(projdef)
+    if p.get("proj") != "stere" or p.get("ellps", "WGS84") != "WGS84":
+        raise ValueError(f"unsupported projection: {projdef}")
+    a, f = 6378137.0, 1 / 298.257223563
+    e = math.sqrt(f * (2 - f))
+    k0 = float(p.get("k", p.get("k_0", 1.0)))
+    phi0, lam0 = math.radians(float(p["lat_0"])), math.radians(float(p["lon_0"]))
+    phi, lam = math.radians(lat), math.radians(lon)
+
+    def chi(ph: float) -> float:  # conformal latitude
+        es = e * math.sin(ph)
+        return 2 * math.atan(math.tan(math.pi / 4 + ph / 2) * ((1 - es) / (1 + es)) ** (e / 2)) - math.pi / 2
+
+    def m(ph: float) -> float:
+        return math.cos(ph) / math.sqrt(1 - (e * math.sin(ph)) ** 2)
+
+    c0, c = chi(phi0), chi(phi)
+    dl = lam - lam0
+    big_a = 2 * a * k0 * m(phi0) / (math.cos(c0) * (1 + math.sin(c0) * math.sin(c) + math.cos(c0) * math.cos(c) * math.cos(dl)))
+    x = big_a * math.cos(c) * math.sin(dl)
+    y = big_a * (math.cos(c0) * math.sin(c) - math.sin(c0) * math.cos(c) * math.cos(dl))
+    return x, y
+
+
 def to_pixels(where: dict, lat: float, lon: float):
     """(col, row, pixel_size_m) of lat/lon in the composite grid, via its projdef."""
-    from pyproj import Proj
-
-    proj = Proj(where["projdef"])
-    ul_x, ul_y = proj(where["UL_lon"], where["UL_lat"])
-    x, y = proj(lon, lat)
+    ul_x, ul_y = stere_xy(where["projdef"], where["UL_lat"], where["UL_lon"])
+    x, y = stere_xy(where["projdef"], lat, lon)
     return (x - ul_x) / where["xscale"], (ul_y - y) / where["yscale"], where["xscale"]
+
+
+def projection_check(where: dict, lat: float, lon: float) -> dict:
+    """Compare the plain-Python projection with pyproj, if pyproj is installed."""
+    try:
+        from pyproj import Proj
+    except ImportError:
+        return {"pyproj": "not installed"}
+    proj = Proj(where["projdef"])
+    worst = 0.0
+    for la, lo in ((lat, lon), (where["UL_lat"], where["UL_lon"]), (where["LR_lat"], where["LR_lon"]), (54.6, 8.0), (57.7, 10.6), (55.1, 14.9)):
+        px, py = proj(lo, la)
+        ox, oy = stere_xy(where["projdef"], la, lo)
+        worst = max(worst, abs(px - ox), abs(py - oy))
+    return {"max_difference_m": round(worst, 3)}
+
+
+def decode(path: Path):
+    """dBZ grid (float32). nodata -> NaN (no radar coverage), undetect -> -inf (covered, no echo)."""
+    import numpy as np
+
+    raw, what, where, node = find_data(path)
+    gain, offset = float(what.get("gain", 1.0)), float(what.get("offset", 0.0))
+    dbz = raw.astype(np.float32) * gain + offset
+    if "undetect" in what:
+        dbz[raw == what["undetect"]] = -np.inf
+    if "nodata" in what:
+        dbz[raw == what["nodata"]] = np.nan
+    return raw, dbz, what, where, node
+
+
+def scan_time(what: dict) -> datetime | None:
+    try:
+        return datetime.strptime(f"{what['date']}{str(what['time'])[:4]}", "%Y%m%d%H%M").replace(tzinfo=UTC)
+    except (KeyError, ValueError):
+        return None
+
+
+# --- nowcast sensors -----------------------------------------------------------
+
+
+def rain_rate(dbz, zr_a: float, zr_b: float):
+    """mm/h from dBZ with Z = a R^b (DMI's file says a=200, b=1.6 = Marshall-Palmer)."""
+    import numpy as np
+
+    with np.errstate(invalid="ignore", over="ignore"):
+        rate = (np.power(10.0, dbz / 10.0) / zr_a) ** (1.0 / zr_b)
+    return np.where(np.isfinite(dbz), rate, np.where(np.isnan(dbz), np.nan, 0.0)).astype(np.float32)
+
+
+def _neighbour_count(mask):
+    """Number of True cells in each 3x3 neighbourhood (despeckling)."""
+    import numpy as np
+
+    p = np.pad(mask.astype(np.uint8), 1)
+    h, w = mask.shape
+    return sum(p[dy:dy + h, dx:dx + w] for dy in range(3) for dx in range(3))
+
+
+def grid_north_deg(where: dict, lat: float, lon: float) -> float:
+    """Angle (deg, clockwise) of true north as seen in the grid at the location."""
+    x0, y0 = stere_xy(where["projdef"], lat, lon)
+    x1, y1 = stere_xy(where["projdef"], lat + 0.01, lon)
+    return math.degrees(math.atan2(x1 - x0, y1 - y0))
+
+
+def compass(deg: float) -> str:
+    return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][round(deg / 45) % 8]
+
+
+def sensors(rate, where: dict, lat: float, lon: float, radius_km: float, rain_mmh: float) -> dict:
+    """Values a Home Assistant integration could expose, computed for one frame."""
+    import numpy as np
+
+    col, row, px = to_pixels(where, lat, lon)
+    c, r = round(col), round(row)
+    h, w = rate.shape
+    if not (0 <= c < w and 0 <= r < h):
+        return {"error": "location outside radar grid"}
+    rad = int(radius_km * 1000 / px)
+    r0, r1, c0, c1 = max(0, r - rad), min(h, r + rad + 1), max(0, c - rad), min(w, c + rad + 1)
+    win = rate[r0:r1, c0:c1]
+    yy, xx = np.mgrid[r0:r1, c0:c1]
+    dist_km = np.hypot(xx - col, yy - row) * px / 1000
+    inside = dist_km <= radius_km
+    covered = inside & np.isfinite(win)
+    rain = np.nan_to_num(win, nan=0.0) >= rain_mmh
+    # A rain pixel counts for "nearest rain" only with >= 3 rain pixels around it (drops speckle/clutter).
+    solid = rain & (_neighbour_count(rain) >= 3)
+
+    here = rate[r, c]
+    near = rate[max(0, r - 2):r + 3, max(0, c - 2):c + 3]  # 2.5 x 2.5 km
+    out: dict = {
+        "rain_rate_mmh": None if np.isnan(here) else round(float(here), 2),
+        "rain_rate_max_1km_mmh": None if np.all(np.isnan(near)) else round(float(np.nanmax(near)), 2),
+        "radar_coverage_pct": round(100 * float(covered.sum() / max(1, inside.sum())), 1),
+        "rain_area_pct": round(100 * float((rain & covered).sum() / max(1, covered.sum())), 1),
+        "rain_max_mmh": round(float(np.nanmax(np.where(covered, win, np.nan))), 2) if covered.any() else None,
+        "radius_km": radius_km,
+        "rain_threshold_mmh": rain_mmh,
+    }
+    cand = solid & inside
+    if cand.any():
+        d = np.where(cand, dist_km, np.inf)
+        i = np.unravel_index(int(np.argmin(d)), d.shape)
+        dx, dy = (xx[i] - col), -(yy[i] - row)  # grid east, grid north (pixels)
+        bearing = (math.degrees(math.atan2(dx, dy)) - grid_north_deg(where, lat, lon)) % 360
+        out["nearest_rain_km"] = round(float(d[i]), 1)
+        out["nearest_rain_bearing_deg"] = round(bearing)
+        out["nearest_rain_direction"] = compass(bearing)
+    else:
+        out["nearest_rain_km"] = None
+    return out
+
+
+def motion(prev_rate, now_rate, minutes: float, where: dict, lat: float, lon: float,
+           rain_mmh: float, window_km: float = 150) -> dict:
+    """Movement of the rain field between two frames (FFT phase correlation over a
+    window around the location), plus a simple nowcast: follow the field backwards
+    from the location to see when rain would arrive."""
+    import numpy as np
+
+    col, row, px = to_pixels(where, lat, lon)
+    c, r = round(col), round(row)
+    half = int(window_km * 1000 / px)
+    h, w = now_rate.shape
+    r0, r1, c0, c1 = max(0, r - half), min(h, r + half), max(0, c - half), min(w, c + half)
+
+    def field(rate):
+        f = np.nan_to_num(rate[r0:r1, c0:c1], nan=0.0)
+        return np.log1p(np.where(f >= rain_mmh, f, 0.0))
+
+    a, b = field(now_rate), field(prev_rate)
+    if a.max() == 0 or b.max() == 0:
+        return {"note": "no rain in the window - no motion to track"}
+    win = np.outer(np.hanning(a.shape[0]), np.hanning(a.shape[1]))
+    fa, fb = np.fft.fft2(a * win), np.fft.fft2(b * win)
+    cross = fa * np.conj(fb)
+    cross /= np.abs(cross) + 1e-9
+    corr = np.fft.ifft2(cross).real
+    peak = np.unravel_index(int(np.argmax(corr)), corr.shape)
+    dy_px, dx_px = (p if p <= s // 2 else p - s for p, s in zip(peak, corr.shape, strict=True))
+    # displacement prev -> now in pixels; convert to grid east/north, then to true direction
+    east, north = dx_px * px, -dy_px * px  # metres in `minutes`
+    speed_kmh = math.hypot(east, north) / 1000 / (minutes / 60)
+    rot = grid_north_deg(where, lat, lon)
+    towards = (math.degrees(math.atan2(east, north)) - rot) % 360
+    out = {
+        "shift_px": [int(dx_px), int(dy_px)],
+        "speed_kmh": round(speed_kmh, 1),
+        "moving_towards_deg": round(towards) if speed_kmh > 0 else None,
+        "coming_from": compass((towards + 180) % 360) if speed_kmh > 0 else None,
+        "peak_strength": round(float(corr.max()), 3),
+    }
+    # Nowcast: what is upstream of us now will be here in t minutes.
+    vx, vy = dx_px / minutes, dy_px / minutes  # pixels per minute (grid col/row)
+    eta = None
+    for t in range(0, 121, 5):
+        pc, pr = round(col - vx * t), round(row - vy * t)
+        if not (2 <= pc < w - 2 and 2 <= pr < h - 2):
+            break
+        if np.nanmax(np.nan_to_num(now_rate[pr - 2:pr + 3, pc - 2:pc + 3], nan=0.0)) >= rain_mmh:
+            eta = t
+            break
+    out["rain_expected_in_min"] = eta
+    out["nowcast_horizon_min"] = 120
+    return out
 
 
 def render(path: Path, lat: float, lon: float, radius_km: float) -> dict:
@@ -215,12 +419,8 @@ def render(path: Path, lat: float, lon: float, radius_km: float) -> dict:
     from PIL import Image, ImageDraw
 
     t0 = time.perf_counter()
-    raw, what, where, node = find_data(path)
+    raw, dbz, what, where, node = decode(path)
     gain, offset = float(what.get("gain", 1.0)), float(what.get("offset", 0.0))
-    dbz = raw.astype(np.float32) * gain + offset
-    for key in ("nodata", "undetect"):
-        if key in what:
-            dbz[raw == what[key]] = np.nan
     t_decode = time.perf_counter() - t0
 
     result = {
@@ -277,8 +477,11 @@ def main() -> None:
     ap.add_argument("--lon", type=float, default=12.1516)
     ap.add_argument("--radius-km", type=float, default=100)
     ap.add_argument("--scan", choices=["fullRange", "doppler"], default="fullRange")
-    ap.add_argument("--frames", type=int, default=1, help="download this many newest files (animation cost)")
-    ap.add_argument("--file", type=Path, help="use an existing .h5 instead of downloading")
+    ap.add_argument("--frames", type=int, default=2,
+                    help="download this many newest files (2 = enough for motion/ETA; 6 = cost of a 1-hour loop)")
+    ap.add_argument("--file", type=Path, nargs="+", help="use existing .h5 file(s) instead of downloading")
+    ap.add_argument("--sensor-radius-km", type=float, default=50, help="radius for rain area / nearest rain")
+    ap.add_argument("--rain-mmh", type=float, default=0.2, help="rain threshold in mm/h")
     ap.add_argument("--reader", choices=["auto", "h5py", "pyfive"], default="auto",
                     help="HDF5 reader (auto = h5py if installed, else pyfive)")
     ap.add_argument("--compare-readers", action="store_true",
@@ -291,7 +494,7 @@ def main() -> None:
 
     files: list[Path] = []
     if args.file:
-        files = [args.file]
+        files = list(args.file)
     else:
         now = datetime.now(UTC)
         report["timing"] = {}
@@ -312,6 +515,33 @@ def main() -> None:
                 {"file": feat["id"], "mb": round(len(data) / 1_048_576, 2), "seconds": round(secs, 2)}
             )
             time.sleep(2)  # spacing between downloads
+
+    # newest first, by scan time in the file
+    frames = []
+    for path in files:
+        _, dbz, what, where, _ = decode(path)
+        frames.append((scan_time(what) or datetime.min.replace(tzinfo=UTC), path, dbz, what, where))
+    frames.sort(key=lambda fr: fr[0], reverse=True)
+    files = [fr[1] for fr in frames]
+    t_new, _, dbz_new, what_new, where_new = frames[0]
+    zr_a, zr_b = 200.0, 1.6
+    try:
+        how = describe(files[0])["groups"].get("how", {})
+        zr_a, zr_b = float(how.get("zr-a", zr_a)), float(how.get("zr-b", zr_b))
+    except Exception:  # noqa: BLE001
+        pass
+    t0 = time.perf_counter()
+    rate_new = rain_rate(dbz_new, zr_a, zr_b)
+    report["sensors"] = {"scan_time": t_new.isoformat(), "zr": [zr_a, zr_b],
+                         **sensors(rate_new, where_new, args.lat, args.lon, args.sensor_radius_km, args.rain_mmh)}
+    if len(frames) >= 2:
+        t_prev, _, dbz_prev, _, _ = frames[1]
+        minutes = (t_new - t_prev).total_seconds() / 60 or 10
+        report["motion"] = {"frames": [t_prev.isoformat(), t_new.isoformat()], "minutes": minutes,
+                            **motion(rain_rate(dbz_prev, zr_a, zr_b), rate_new, minutes, where_new,
+                                     args.lat, args.lon, args.rain_mmh)}
+    report["sensors"]["compute_s"] = round(time.perf_counter() - t0, 3)
+    report["projection_check"] = projection_check(where_new, args.lat, args.lon)
 
     report["structure"] = describe(files[0])
     report["render"] = render(files[0], args.lat, args.lon, args.radius_km)
@@ -345,6 +575,26 @@ def main() -> None:
         print(f"reader     {name}: {res}")
     print(f"render     [{r['reader']}] decode {r['decode_s']} s + png {r['render_s']} s -> {r['png']} "
           f"({r['png_kb']} kB, {r['crop_px'][0]}x{r['crop_px'][1]} px)")
+    se = report["sensors"]
+    print(f"sensors    @ {se['scan_time']}: rain here {se.get('rain_rate_mmh')} mm/h "
+          f"(max within ~1 km {se.get('rain_rate_max_1km_mmh')}), "
+          f"rain on {se.get('rain_area_pct')}% within {se.get('radius_km')} km (max {se.get('rain_max_mmh')} mm/h), "
+          f"coverage {se.get('radar_coverage_pct')}%")
+    if se.get("nearest_rain_km") is not None:
+        print(f"           nearest rain {se['nearest_rain_km']} km to the {se['nearest_rain_direction']} "
+              f"({se['nearest_rain_bearing_deg']} deg)")
+    else:
+        print(f"           no rain >= {se.get('rain_threshold_mmh')} mm/h within {se.get('radius_km')} km")
+    mo = report.get("motion")
+    if mo:
+        if "speed_kmh" in mo:
+            print(f"motion     {mo['speed_kmh']} km/h from {mo['coming_from']}  shift {mo['shift_px']} px "
+                  f"in {mo['minutes']:.0f} min  (peak {mo['peak_strength']})")
+            eta = mo["rain_expected_in_min"]
+            print(f"nowcast    {'raining now' if eta == 0 else f'rain in ~{eta} min' if eta else 'no rain expected within 2 h'}")
+        else:
+            print(f"motion     {mo.get('note')}")
+    print(f"projection plain Python vs pyproj: {report['projection_check']}  (sensor compute {se['compute_s']} s)")
     print(f"memory     peak {report['peak_memory_mb']} MB")
     print(f"full report: {OUT / 'report.json'}")
 
