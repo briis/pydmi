@@ -74,12 +74,18 @@ def timing(features: list[dict], now: datetime) -> dict:
 
 
 def _attrs(obj) -> dict:
+    """Attributes as plain Python values. pyfive returns scalars as 1-element
+    arrays (UL_lon: [3.0]) - unwrap those."""
     out = {}
     for k, v in obj.attrs.items():
         if hasattr(v, "decode"):
             v = v.decode(errors="replace")
         elif hasattr(v, "tolist"):
             v = v.tolist()
+        if isinstance(v, list) and len(v) == 1:
+            v = v[0]
+        if isinstance(v, bytes):
+            v = v.decode(errors="replace")
         out[k] = v
     return out
 
@@ -138,13 +144,18 @@ def find_data(path: Path):
     f, _ = _open(path)
     with _closing(f):
         where = _attrs(f["where"]) if "where" in f.keys() else {}
+        # ODIM lets gain/offset/nodata/undetect/quantity live at any level; DMI puts the
+        # scaling in the ROOT "what" and "quantity" on the data group itself. Merge all,
+        # most specific last.
+        root_what = _attrs(f["what"]) if "what" in f.keys() else {}
         for ds in sorted(k for k in f.keys() if k.startswith("dataset")):
+            ds_what = _attrs(f[ds]["what"]) if "what" in f[ds].keys() else {}
             for dk in sorted(k for k in f[ds].keys() if k.startswith("data")):
                 node = f[ds][dk]
                 if "data" not in node.keys():
                     continue
-                what = {**(_attrs(f[ds]["what"]) if "what" in f[ds].keys() else {}),
-                        **(_attrs(node["what"]) if "what" in node.keys() else {})}
+                node_what = _attrs(node["what"]) if "what" in node.keys() else {}
+                what = {**root_what, **ds_what, **_attrs(node), **node_what}
                 arr = np.asarray(node["data"][()])
                 return arr, what, where, f"{ds}/{dk}"
     raise SystemExit("No dataset*/data*/data found - see the structure in report.json")
@@ -214,7 +225,7 @@ def render(path: Path, lat: float, lon: float, radius_km: float) -> dict:
 
     result = {
         "node": node,
-        "quantity": what.get("quantity"),
+        "quantity": what.get("quantity") or what.get("product"),
         "grid": list(raw.shape),
         "dtype": str(raw.dtype),
         "gain": gain,

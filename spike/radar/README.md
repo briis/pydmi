@@ -12,6 +12,20 @@ whether radar is worth adding to pydmi and ha-dmi-weather before touching the re
 - New file every 10 minutes (`fullRange`), published about 12 minutes after its timestamp.
 - HDF5 only (no images). File size not documented.
 
+## Findings (first live run, 10 Nov 2026)
+
+| | fullRange | doppler |
+|---|---|---|
+| Interval | 10 min (:00, :10 …) | 10 min, offset 5 min (:05, :15 …) |
+| Published after | ~12 min | ~7 min |
+
+- One file is **0.13 MB** (downloaded in 0.19 s): 1984 × 1728 points at 500 m, `uint8`, stereographic
+  projection (`+proj=stere +lat_0=56 +lon_0=10.5666 +lat_ts=56`), ODIM_H5 V2_0, quantity `DBZH`.
+- DMI puts `gain` (0.5), `offset` (-32), `nodata` (255) and `undetect` (0) in the **root** `what`, and
+  `quantity` directly on `dataset1/data1`. Corners in `where` (`UL` = 3.0°E, 60.0°N).
+- pyfive returns scalar attributes as 1-element arrays; the script unwraps them.
+- pyfive (pure Python) reads the real file fine.
+
 ## Run it
 
 ```bash
